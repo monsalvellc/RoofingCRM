@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Owner/.claude/projects/c--Users-Owner-Documents-RoofingLeadApp/memory/**)"
+    ]
+  }
+}
