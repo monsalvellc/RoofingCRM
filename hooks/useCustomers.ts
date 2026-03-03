@@ -41,11 +41,16 @@ export function useGetAllCustomers(companyId: string) {
 
 // ─── Mutation Hooks ───────────────────────────────────────────────────────────
 
+type CreateCustomerVars = {
+  data: Omit<Customer, 'id'>;
+  creator?: { id: string; name: string } | null;
+};
+
 /** Creates a new customer. Invalidates all customer queries on success. */
 export function useCreateCustomer() {
   const queryClient = useQueryClient();
-  return useMutation<Customer, Error, Omit<Customer, 'id'>>({
-    mutationFn: (data) => createCustomer(data),
+  return useMutation<Customer, Error, CreateCustomerVars>({
+    mutationFn: ({ data, creator }) => createCustomer(data, creator),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: customerKeys.all });
     },

@@ -69,13 +69,81 @@ export async function getAllCustomers(companyId: string): Promise<Customer[]> {
 
 /**
  * Creates a new customer document. Firestore auto-generates the document ID.
- * Returns the full Customer object including the generated ID.
+ * Automatically stamps timestamps, sets isDeleted, assigns the creator, and
+ * writes an initial assignment history entry.
+ * @param data    Core customer fields (createdAt/updatedAt/isDeleted are overwritten internally).
+ * @param creator The logged-in user creating the record, or null if unavailable.
  * @throws If the Firestore write fails.
  */
-export async function createCustomer(data: Omit<Customer, 'id'>): Promise<Customer> {
+// export async function createCustomer(
+//   data: Omit<Customer, 'id'>,
+//   creator?: { id: string; name: string } | null,
+// ): Promise<Customer> {
+//   try {
+//     const now = new Date().toISOString();
+//     const dateLabel = new Date().toLocaleDateString('en-US', {
+//       month: 'short',
+//       day: 'numeric',
+//       year: 'numeric',
+//     });
+
+//     const historyEntry = creator
+//       ? `Customer created - ${creator.name} on ${dateLabel}`
+//       : `Customer created on ${dateLabel}`;
+
+//     const assignedUserIds = [...(data.assignedUserIds ?? [])];
+//     if (creator?.id && !assignedUserIds.includes(creator.id)) {
+//       assignedUserIds.push(creator.id);
+//     }
+
+//     const payload: Omit<Customer, 'id'> = {
+//       ...data,
+//       assignedUserIds,
+//       assignmentHistory: [historyEntry],
+//       isDeleted: false,
+//       createdAt: now,
+//       updatedAt: now,
+//     };
+
+//     const ref = await addDoc(collection(db, COLLECTIONS.customers), payload);
+//     return { id: ref.id, ...payload };
+//   } catch (error) {
+//     console.error('[customersService] createCustomer failed:', error);
+//     throw new Error('Failed to create customer. Please try again.');
+//   }
+// }
+
+export async function createCustomer(
+  data: Omit<Customer, 'id'>, 
+  creator?: { id: string; name: string } | null
+): Promise<Customer> {
   try {
-    const ref = await addDoc(collection(db, COLLECTIONS.customers), data);
-    return { id: ref.id, ...data };
+    const now = new Date().toISOString();
+    
+    // 1. Generate the History Log
+    const dateStr = new Date().toLocaleDateString();
+    const historyEntry = creator 
+      ? `Customer created - ${creator.name} on ${dateStr}`
+      : `Customer created on ${dateStr}`;
+
+    // 2. Ensure the Creator is Assigned (if not already)
+    let finalAssignments = data.assignedUserIds || [];
+    if (creator && !finalAssignments.includes(creator.id)) {
+      finalAssignments = [...finalAssignments, creator.id];
+    }
+
+    // 3. Build the Robust Payload
+    const payload = {
+      ...data,
+      assignedUserIds: finalAssignments,
+      assignmentHistory: [historyEntry], // <--- Starts the log!
+      isDeleted: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const ref = await addDoc(collection(db, COLLECTIONS.customers), payload);
+    return { id: ref.id, ...payload };
   } catch (error) {
     console.error('[customersService] createCustomer failed:', error);
     throw new Error('Failed to create customer. Please try again.');

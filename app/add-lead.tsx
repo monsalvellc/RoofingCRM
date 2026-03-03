@@ -217,19 +217,27 @@ export default function AddLeadScreen() {
         customerId = selectedExistingCustomer.id;
       } else {
         const newCustomer = await createCustomerAsync({
-          companyId,
-          firstName,
-          lastName,
-          phone: phone || '',
-          email: email || '',
-          address,
-          alternateAddress: alternateAddress || '',
-          leadSource: leadSource || '',
-          notes: notes || '',
-          location: locationCoords ?? undefined,
-          createdAt: now,
-          updatedAt: now,
-          isDeleted: false,
+          data: {
+            companyId,
+            firstName,
+            lastName,
+            phone: phone || '',
+            email: email || '',
+            address,
+            alternateAddress: alternateAddress || '',
+            leadSource: leadSource || '',
+            notes: notes || '',
+            location: locationCoords ?? undefined,
+            createdAt: now,
+            updatedAt: now,
+            isDeleted: false,
+          },
+          creator: user?.uid
+            ? {
+                id: user.uid,
+                name: `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'Rep',
+              }
+            : null,
         });
         customerId = newCustomer.id;
       }

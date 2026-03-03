@@ -7,6 +7,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  TextInput,
   View,
 } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
@@ -35,6 +36,7 @@ export default function CustomerProfileScreen() {
   // ─── Local UI State ─────────────────────────────────────────────────────────
   const [isAssignModalVisible, setIsAssignModalVisible] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // ─── Loading & Error States ──────────────────────────────────────────────────
 
@@ -68,8 +70,15 @@ export default function CustomerProfileScreen() {
 
   const handleOpenAssignModal = () => {
     setSelectedUserIds(customer.assignedUserIds ?? []);
+    setSearchQuery('');
     setIsAssignModalVisible(true);
   };
+
+  const filteredUsers = searchQuery.trim()
+    ? companyUsers.filter((u) =>
+        u.name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
+      )
+    : companyUsers;
 
   const handleSaveAssignments = () => {
     const prevIds: string[] = customer.assignedUserIds ?? [];
@@ -194,9 +203,20 @@ export default function CustomerProfileScreen() {
               />
             </View>
 
+            {/* Search bar */}
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search reps..."
+              placeholderTextColor={COLORS.textDisabled}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+
             {/* User list */}
             <FlatList
-              data={companyUsers}
+              data={filteredUsers}
               keyExtractor={(item) => item.id}
               style={styles.modalList}
               renderItem={({ item }) => {
@@ -381,6 +401,17 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: FONT_SIZE.xl,
     fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textPrimary,
+  },
+  searchInput: {
+    marginHorizontal: SPACING.base,
+    marginTop: SPACING.md,
+    marginBottom: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 10,
+    backgroundColor: COLORS.background,
+    borderRadius: RADIUS.md,
+    fontSize: FONT_SIZE.base,
     color: COLORS.textPrimary,
   },
   modalList: {

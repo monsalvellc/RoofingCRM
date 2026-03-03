@@ -10,8 +10,8 @@ export interface Customer {
   leadSource?: string;
   notes?: string;
   location?: { lat: number; lng: number };
-  createdAt: number;
-  updatedAt: number;
+  createdAt: number | string;
+  updatedAt: number | string;
   isDeleted: boolean;
   assignedUserIds?: string[];
   assignmentHistory?: string[];
