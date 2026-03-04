@@ -213,10 +213,6 @@ export default function DashboardScreen() {
     setIsFilterModalVisible(false);
   };
 
-  const formatDate = (timestamp: number) => {
-    const d = new Date(timestamp);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
 
   // ─── Loading & Error States ──────────────────────────────────────────────────
 
@@ -364,24 +360,20 @@ export default function DashboardScreen() {
             const displayStatus = getDisplayStatus(group.jobs);
             const statusColor = STATUS_COLORS[displayStatus] ?? '#999';
             const activeJobId = getActiveJobId(group.jobs);
-            const totalContract = group.jobs.reduce((s, j) => s + (j.contractAmount || 0), 0);
-            const totalBalance = group.jobs.reduce((s, j) => s + (j.balance || 0), 0);
-            const newestCreatedAt = Math.max(...group.jobs.map((j) => safeParseTime(j.createdAt)));
+            const top3Jobs = [...group.jobs]
+              .sort((a, b) => safeParseTime(b.createdAt) - safeParseTime(a.createdAt))
+              .slice(0, 3);
 
-            let financialColor: string = COLORS.textMuted;
-            if (totalContract > 0) {
-              if (totalBalance === 0) {
-                financialColor = COLORS.primary;
-              } else {
-                const hasOverdue = group.jobs.some((j) => {
-                  if (j.status === 'Completed' && j.balance > 0 && j.completedAt) {
-                    return (Date.now() - new Date(j.completedAt).getTime()) / 86400000 > 5;
-                  }
-                  return false;
-                });
-                financialColor = hasOverdue ? '#FF5F1F' : COLORS.danger;
+            const getJobColor = (job: Job): string => {
+              if (job.status === 'Completed' && job.balance > 0 && job.completedAt) {
+                if ((Date.now() - new Date(job.completedAt).getTime()) / 86400000 > 5) {
+                  return '#FF5F1F';
+                }
               }
-            }
+              if (job.balance > 0) return COLORS.danger;
+              if (job.status === 'Completed' && (job.balance ?? 0) === 0) return COLORS.primary;
+              return COLORS.textMuted;
+            };
 
             return (
               <Pressable onPress={() => router.push(`/job/${activeJobId}`)}>
@@ -400,13 +392,14 @@ export default function DashboardScreen() {
                     </View>
                   </View>
                   <View style={styles.cardBottom}>
-                    <View style={styles.contractRow}>
-                      <Typography style={styles.contractLabel}>Contract: </Typography>
-                      <Typography style={[styles.contractAmount, { color: financialColor }]}>
-                        ${totalContract.toFixed(2)}
-                      </Typography>
+                    <View style={styles.financialRow}>
+                      <Typography style={styles.contractLabel}>Contracts:</Typography>
+                      {top3Jobs.map((job) => (
+                        <Typography key={job.id} style={[styles.jobAmount, { color: getJobColor(job) }]}>
+                          ${(job.contractAmount || 0).toLocaleString()}
+                        </Typography>
+                      ))}
                     </View>
-                    <Typography style={styles.cardDate}>{formatDate(newestCreatedAt)}</Typography>
                   </View>
                 </Card>
               </Pressable>
@@ -708,6 +701,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  financialRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 4,
+  },
+  jobAmount: {
+    fontWeight: FONT_WEIGHT.semibold,
+    fontSize: 13,
   },
   contractRow: {
     flexDirection: 'row',
