@@ -1,12 +1,16 @@
 import { useState } from 'react';
 import {
   Alert,
+  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   View,
 } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
+import { usePreferences } from '../../context/PreferencesContext';
 import { useUpdateUserProfile } from '../../hooks';
 import { Button, Card, Typography } from '../../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../constants/theme';
@@ -14,8 +18,10 @@ import { COLORS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../constants/theme';
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SettingsScreen() {
+  const router = useRouter();
   const { userProfile, logout } = useAuth();
   const { mutate: updateProfile } = useUpdateUserProfile();
+  const { showTopThreeJobs, toggleShowTopThreeJobs } = usePreferences();
 
   // Optimistic local state for the HD toggle so the switch reflects changes immediately
   const [hdEnabled, setHdEnabled] = useState(userProfile?.hdPhotosEnabled ?? false);
@@ -58,6 +64,20 @@ export default function SettingsScreen() {
 
       <ScrollView contentContainerStyle={styles.body}>
 
+        {/* ── Admin Controls (SuperAdmin only) ── */}
+        {userProfile?.role === 'SuperAdmin' && (
+          <>
+            <Typography style={styles.sectionLabel}>Admin Controls</Typography>
+            <Card elevation="sm" style={styles.cardPadding}>
+              <Pressable style={styles.navRow} onPress={() => router.push('/manage-team')}>
+                <Ionicons name="people" size={20} color={COLORS.primary} style={styles.navIcon} />
+                <Typography style={styles.navLabel}>Manage Team & Seats</Typography>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+            </Card>
+          </>
+        )}
+
         {/* ── Profile Card ── */}
         <Typography style={styles.sectionLabel}>Profile</Typography>
         <Card elevation="sm" style={styles.cardPadding}>
@@ -85,6 +105,20 @@ export default function SettingsScreen() {
             </Card>
           </>
         )}
+
+        {/* ── Dashboard Settings ── */}
+        <Typography style={styles.sectionLabel}>Dashboard Settings</Typography>
+        <Card elevation="sm" style={styles.cardPadding}>
+          <View style={styles.row}>
+            <Typography style={styles.hdLabel}>Show Top 3 Jobs Per Customer</Typography>
+            <Switch
+              value={showTopThreeJobs}
+              onValueChange={toggleShowTopThreeJobs}
+              trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+              thumbColor={showTopThreeJobs ? COLORS.primary : COLORS.textDisabled}
+            />
+          </View>
+        </Card>
 
         {/* ── Sign Out ── */}
         <Button
@@ -173,6 +207,21 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.textPrimary,
     flex: 1,
+  },
+
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+  },
+  navIcon: {
+    marginRight: SPACING.sm,
+  },
+  navLabel: {
+    flex: 1,
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textPrimary,
   },
 
   divider: {

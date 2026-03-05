@@ -1,9 +1,24 @@
 export interface Company {
   id: string;
   name: string;
-  maxSeats: number;
-  activeSeats: number;
+  allowedSeats: number;
+  logoUrl?: string;
   createdAt: number;
+  subscriptionStatus: 'active' | 'past_due' | 'canceled' | 'trialing';
+  planInterval: 'month' | 'year';
+  /** Firestore Timestamp, Date, or Unix milliseconds — normalize before comparing. */
+  currentPeriodEnd: number | Date | any;
+}
+
+export interface SalesRep {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: string;
+  companyId: string;
+  createdAt?: string | number;
+  expiresAt?: string | number;
 }
 
 export interface UserProfile {
@@ -12,7 +27,7 @@ export interface UserProfile {
   firstName: string;
   lastName: string;
   companyId: string;
-  role: 'SuperAdmin' | 'CompanyAdmin' | 'User';
+  role: 'SuperAdmin' | 'CompanyAdmin' | 'Sales' | 'User';
   tags: string[];
   isActive: boolean;
   createdAt: number;

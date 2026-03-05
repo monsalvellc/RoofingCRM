@@ -1,7 +1,16 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { auth } from '../config/firebaseConfig';
-import { getHdPhotoQuality, getCompanyUsers, updateUserProfile } from '../services';
+import {
+  getHdPhotoQuality,
+  getCompanyUsers,
+  updateUserProfile,
+  getCompany,
+  getSalesReps,
+  createRepProfile,
+  createAuthUserSecondary,
+} from '../services';
 import type { CompanyUser } from '../services';
+import type { Company, SalesRep } from '../types';
 
 // ─── Query Keys ───────────────────────────────────────────────────────────────
 
@@ -9,6 +18,8 @@ export const userKeys = {
   all: ['users'] as const,
   hdQuality: (uid: string) => ['users', uid, 'hdQuality'] as const,
   companyUsers: (companyId: string) => ['users', 'company', companyId] as const,
+  salesReps: (companyId: string) => ['users', 'salesReps', companyId] as const,
+  company: (companyId: string) => ['company', companyId] as const,
 };
 
 // ─── Query Hooks ──────────────────────────────────────────────────────────────
@@ -55,6 +66,60 @@ export function useUpdateUserProfile() {
     mutationFn: (data) => updateUserProfile(uid, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: userKeys.hdQuality(uid) });
+    },
+  });
+}
+
+/** Fetches the company document for seat-limit and billing info. */
+export function useGetCompany(companyId: string) {
+  return useQuery<Company, Error>({
+    queryKey: userKeys.company(companyId),
+    queryFn: () => getCompany(companyId),
+    enabled: !!companyId,
+  });
+}
+
+/** Fetches all Sales-role users belonging to the company. */
+export function useGetSalesReps(companyId: string) {
+  return useQuery<SalesRep[], Error>({
+    queryKey: userKeys.salesReps(companyId),
+    queryFn: () => getSalesReps(companyId),
+    enabled: !!companyId,
+  });
+}
+
+type CreateRepVars = {
+  email: string;
+  firstName: string;
+  lastName: string;
+  companyId: string;
+};
+
+/**
+ * Creates a Firebase Auth account (via secondary app) then writes the
+ * Firestore profile. Invalidates the salesReps cache on success.
+ */
+export function useCreateRep() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, CreateRepVars>({
+    mutationFn: async ({ email, firstName, lastName, companyId }) => {
+      const uid = await createAuthUserSecondary(email, 'Welcome123!');
+      const now = new Date().toISOString();
+      const expiresAt = new Date(
+        new Date().setFullYear(new Date().getFullYear() + 1),
+      ).toISOString();
+      await createRepProfile(uid, {
+        email,
+        firstName,
+        lastName,
+        role: 'Sales',
+        companyId,
+        createdAt: now,
+        expiresAt,
+      });
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: userKeys.salesReps(vars.companyId) });
     },
   });
 }

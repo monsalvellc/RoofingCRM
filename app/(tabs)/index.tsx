@@ -11,7 +11,8 @@ import {
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
-import { useGetAllJobs } from '../../hooks';
+import { usePreferences } from '../../context/PreferencesContext';
+import { useGetAllJobs, useGetAllCustomers } from '../../hooks';
 import { Button, Card, Typography } from '../../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
 import type { Job } from '../../types';
@@ -103,10 +104,12 @@ function getActiveJobId(customerJobs: Job[]): string {
 export default function DashboardScreen() {
   const router = useRouter();
   const { user, userProfile } = useAuth();
+  const { showTopThreeJobs } = usePreferences();
   const companyId = userProfile?.companyId ?? '';
 
   // ─── Server State ───────────────────────────────────────────────────────────
   const { data: allJobs = [], isLoading, error } = useGetAllJobs(companyId);
+  const { data: allCustomers = [] } = useGetAllCustomers(companyId);
 
   // ─── Local UI State ─────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
@@ -161,21 +164,34 @@ export default function DashboardScreen() {
 
     if (searchQuery.trim()) {
       const lowerQuery = searchQuery.trim().toLowerCase();
-      const numericQuery = searchQuery.replace(/\D/g, '');
+      // Only strip to digits for phone matching if the query has NO alphabetic chars.
+      // "336" → numericQuery="336", no letters → phone check runs.
+      // "336pp" → has letters → phone check is skipped entirely.
+      const queryHasLetters = /[a-z]/.test(lowerQuery);
+      const numericQuery = lowerQuery.replace(/\D/g, '');
+
+      // Build a fast O(1) customer lookup so we can read address fields.
+      const customerMap = new Map(allCustomers.map((c) => [c.id, c]));
+
       result = result.filter((group) => {
         if (group.customerName.toLowerCase().includes(lowerQuery)) return true;
+
+        // Address search against the Customer document (address isn't on Job).
+        const customer = customerMap.get(group.customerId);
+        const address = (customer?.address || '').toLowerCase();
+        const altAddress = (customer?.alternateAddress || '').toLowerCase();
+        if (address.includes(lowerQuery) || altAddress.includes(lowerQuery)) return true;
+
         return group.jobs.some((job) => {
-          const address = ((job as any).customerAddress || '').toLowerCase();
-          const altAddress = ((job as any).customerAlternateAddress || '').toLowerCase();
-          const phone = (job.customerPhone || '').replace(/\D/g, '');
+          const jobPhone = (job.customerPhone || '').replace(/\D/g, '');
           const jName = (job.jobName || '').toLowerCase();
           const jId = (job.jobId || '').toLowerCase();
+          const phoneMatch =
+            !queryHasLetters && numericQuery.length > 0 && jobPhone.includes(numericQuery);
           return (
-            address.includes(lowerQuery) ||
-            altAddress.includes(lowerQuery) ||
             jName.includes(lowerQuery) ||
             jId.includes(lowerQuery) ||
-            (numericQuery.length > 0 && phone.includes(numericQuery))
+            phoneMatch
           );
         });
       });
@@ -189,7 +205,7 @@ export default function DashboardScreen() {
     }
 
     return result;
-  }, [allCustomerGroups, searchQuery, statusFilter, typeFilter]);
+  }, [allCustomerGroups, allCustomers, searchQuery, statusFilter, typeFilter]);
 
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
@@ -360,9 +376,10 @@ export default function DashboardScreen() {
             const displayStatus = getDisplayStatus(group.jobs);
             const statusColor = STATUS_COLORS[displayStatus] ?? '#999';
             const activeJobId = getActiveJobId(group.jobs);
+            const jobLimit = showTopThreeJobs ? 3 : 1;
             const top3Jobs = [...group.jobs]
               .sort((a, b) => safeParseTime(b.createdAt) - safeParseTime(a.createdAt))
-              .slice(0, 3);
+              .slice(0, jobLimit);
 
             const getJobColor = (job: Job): string => {
               if (job.status === 'Completed' && job.balance > 0 && job.completedAt) {

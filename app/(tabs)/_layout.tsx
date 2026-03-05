@@ -39,6 +39,8 @@ export default function TabsLayout() {
           ),
         }}
       />
+      {/* Suppress the legacy team.tsx file so it never appears in the tab bar. */}
+      <Tabs.Screen name="team" options={{ href: null }} />
     </Tabs>
   );
 }
