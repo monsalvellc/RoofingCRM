@@ -5,15 +5,17 @@ import {
   Modal,
   Pressable,
   StyleSheet,
+  Switch,
   TextInput,
   View,
   ActivityIndicator,
 } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import { useGetCompany, useGetSalesReps, useCreateRep } from '../hooks';
-import { updateUserProfile } from '../services';
+import { deactivateRep, reactivateRep } from '../services';
 import { Card, Typography } from '../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../constants/theme';
 import type { SalesRep } from '../types';
@@ -34,8 +36,10 @@ export default function ManageTeamScreen() {
   }, [authLoading, userProfile]);
 
   const { data: company, isLoading: companyLoading } = useGetCompany(companyId);
-  const { data: salesReps = [], isLoading: repsLoading } = useGetSalesReps(companyId);
+  // Returns ALL reps (active + inactive) — filtering is done client-side.
+  const { data: allReps = [], isLoading: repsLoading } = useGetSalesReps(companyId);
   const { mutateAsync: createRep, isPending: isCreating } = useCreateRep();
+  const queryClient = useQueryClient();
 
   // ─── Add Rep Modal State ─────────────────────────────────────────────────────
   const [addModalVisible, setAddModalVisible] = useState(false);
@@ -43,22 +47,25 @@ export default function ManageTeamScreen() {
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
 
-  // ─── Edit Rep Modal State ────────────────────────────────────────────────────
-  const [editModalVisible, setEditModalVisible] = useState(false);
-  const [editingRep, setEditingRep] = useState<SalesRep | null>(null);
-  const [editFirstName, setEditFirstName] = useState('');
-  const [editLastName, setEditLastName] = useState('');
-  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  // ─── Toggle & Derived Lists ──────────────────────────────────────────────────
+  const [showInactive, setShowInactive] = useState(false);
+
+  const activeReps = allReps.filter((r) => r.isActive !== false);
+  const displayedReps = showInactive
+    ? allReps.filter((r) => r.isActive === false)
+    : activeReps;
+
+  // ─── Action Modal State ──────────────────────────────────────────────────────
+  const [actionModalVisible, setActionModalVisible] = useState(false);
+  const [selectedRep, setSelectedRep] = useState<SalesRep | null>(null);
+  const [isActioning, setIsActioning] = useState(false);
 
   // ─── Handlers ────────────────────────────────────────────────────────────────
 
   const handleOpenAddModal = () => {
     const allowedSeats = company?.allowedSeats ?? 0;
-    if (salesReps.length >= allowedSeats) {
-      Alert.alert(
-        'Seat Limit Reached',
-        'Please upgrade your plan to add more reps.',
-      );
+    if (activeReps.length >= allowedSeats) {
+      Alert.alert('Seat Limit Reached', 'Please upgrade your plan to add more reps.');
       return;
     }
     setFirstName('');
@@ -85,33 +92,74 @@ export default function ManageTeamScreen() {
     }
   };
 
-  const handleOpenEditModal = (rep: SalesRep) => {
-    setEditingRep(rep);
-    setEditFirstName(rep.firstName);
-    setEditLastName(rep.lastName);
-    setEditModalVisible(true);
+  const handleOpenActionModal = (rep: SalesRep) => {
+    setSelectedRep(rep);
+    setActionModalVisible(true);
   };
 
-  const handleSaveEdit = async () => {
-    if (!editingRep || !editFirstName.trim() || !editLastName.trim()) return;
-    setIsSavingEdit(true);
-    try {
-      await updateUserProfile(editingRep.id, {
-        firstName: editFirstName.trim(),
-        lastName: editLastName.trim(),
-      });
-      setEditModalVisible(false);
-    } catch (err: any) {
-      Alert.alert('Error', err.message ?? 'Failed to update rep.');
-    } finally {
-      setIsSavingEdit(false);
+  const handleRevokeAccess = () => {
+    if (!selectedRep) return;
+    Alert.alert(
+      'Revoke Access',
+      `Remove ${selectedRep.firstName} ${selectedRep.lastName} from your team? They will no longer be able to log in.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Revoke Access',
+          style: 'destructive',
+          onPress: async () => {
+            setIsActioning(true);
+            try {
+              await deactivateRep(selectedRep.id);
+              queryClient.invalidateQueries({ queryKey: ['users', 'salesReps', companyId] });
+              setActionModalVisible(false);
+            } catch (err: any) {
+              Alert.alert('Error', err.message ?? 'Failed to revoke access.');
+            } finally {
+              setIsActioning(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleReactivate = () => {
+    if (!selectedRep) return;
+    const allowedSeats = company?.allowedSeats ?? 0;
+    if (activeReps.length >= allowedSeats) {
+      Alert.alert(
+        'Seat Limit Reached',
+        'You must upgrade your plan or revoke access from another user before reactivating this rep.',
+      );
+      return;
     }
+    Alert.alert(
+      'Reactivate Access',
+      `Restore access for ${selectedRep.firstName} ${selectedRep.lastName}? They will be able to log in again.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reactivate',
+          onPress: async () => {
+            setIsActioning(true);
+            try {
+              await reactivateRep(selectedRep.id);
+              queryClient.invalidateQueries({ queryKey: ['users', 'salesReps', companyId] });
+              setActionModalVisible(false);
+            } catch (err: any) {
+              Alert.alert('Error', err.message ?? 'Failed to reactivate rep.');
+            } finally {
+              setIsActioning(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
-  // ─── Loading / Auth Guard State ──────────────────────────────────────────────
+  // ─── Loading / Auth Guard ─────────────────────────────────────────────────────
 
-  // Show a blank spinner while auth resolves or while a non-SuperAdmin is
-  // being redirected away — prevents a flash of the admin UI.
   if (authLoading || userProfile?.role !== 'SuperAdmin') {
     return (
       <View style={styles.centered}>
@@ -129,6 +177,7 @@ export default function ManageTeamScreen() {
   }
 
   const allowedSeats = company?.allowedSeats ?? 0;
+  const isRepInactive = selectedRep?.isActive === false;
 
   // ─── Render ──────────────────────────────────────────────────────────────────
 
@@ -144,7 +193,7 @@ export default function ManageTeamScreen() {
         <View style={styles.headerText}>
           <Typography style={styles.title}>Team Management</Typography>
           <Typography style={styles.seatCount}>
-            Seats: {salesReps.length} / {allowedSeats}
+            Active Seats: {activeReps.length} / {allowedSeats}
           </Typography>
         </View>
         <Pressable style={styles.addButton} onPress={handleOpenAddModal}>
@@ -152,41 +201,64 @@ export default function ManageTeamScreen() {
         </Pressable>
       </View>
 
+      {/* ── Show Inactive Toggle ── */}
+      <View style={styles.toggleRow}>
+        <Typography style={styles.toggleLabel}>Show Inactive Team Members</Typography>
+        <Switch
+          value={showInactive}
+          onValueChange={setShowInactive}
+          trackColor={{ false: COLORS.border, true: COLORS.primary }}
+          thumbColor={COLORS.white}
+        />
+      </View>
+
       {/* ── Rep List ── */}
-      {salesReps.length === 0 ? (
+      {displayedReps.length === 0 ? (
         <View style={styles.empty}>
-          <Typography style={styles.emptyText}>No reps yet. Tap + to add one.</Typography>
+          <Typography style={styles.emptyText}>
+            {showInactive ? 'No team members found.' : 'No active reps. Tap + to add one.'}
+          </Typography>
         </View>
       ) : (
         <FlatList
-          data={salesReps}
+          data={displayedReps}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
-          renderItem={({ item: rep }) => (
-            <Card elevation="sm" style={styles.repCard}>
-              <View style={styles.repCardInner}>
-                <View style={styles.avatar}>
-                  <Typography style={styles.avatarText}>
-                    {(rep.firstName?.[0] ?? '').toUpperCase()}
-                    {(rep.lastName?.[0] ?? '').toUpperCase()}
-                  </Typography>
+          renderItem={({ item: rep }) => {
+            const inactive = rep.isActive === false;
+            return (
+              <Card elevation="sm" style={[styles.repCard, inactive && styles.repCardInactive]}>
+                <View style={styles.repCardInner}>
+                  <View style={[styles.avatar, inactive && styles.avatarInactive]}>
+                    <Typography style={styles.avatarText}>
+                      {(rep.firstName?.[0] ?? '').toUpperCase()}
+                      {(rep.lastName?.[0] ?? '').toUpperCase()}
+                    </Typography>
+                  </View>
+                  <View style={styles.repInfo}>
+                    <Typography style={[styles.repName, inactive && styles.repNameInactive]}>
+                      {rep.firstName} {rep.lastName}
+                    </Typography>
+                    <View style={styles.repRoleRow}>
+                      <Typography style={styles.repRole}>{rep.role}</Typography>
+                      {inactive && (
+                        <View style={styles.inactiveBadge}>
+                          <Typography style={styles.inactiveBadgeText}>Inactive</Typography>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                  <Pressable
+                    style={styles.editBtn}
+                    onPress={() => handleOpenActionModal(rep)}
+                    hitSlop={8}
+                  >
+                    <Ionicons name="pencil" size={18} color={COLORS.textMuted} />
+                  </Pressable>
                 </View>
-                <View style={styles.repInfo}>
-                  <Typography style={styles.repName}>
-                    {rep.firstName} {rep.lastName}
-                  </Typography>
-                  <Typography style={styles.repRole}>{rep.role}</Typography>
-                </View>
-                <Pressable
-                  style={styles.editBtn}
-                  onPress={() => handleOpenEditModal(rep)}
-                  hitSlop={8}
-                >
-                  <Ionicons name="pencil" size={18} color={COLORS.textMuted} />
-                </Pressable>
-              </View>
-            </Card>
-          )}
+              </Card>
+            );
+          }}
         />
       )}
 
@@ -250,7 +322,7 @@ export default function ManageTeamScreen() {
             </Typography>
 
             <Pressable
-              style={[styles.submitBtn, isCreating && styles.submitBtnDisabled]}
+              style={[styles.submitBtn, isCreating && styles.btnDisabled]}
               onPress={handleAddRep}
               disabled={isCreating}
             >
@@ -265,55 +337,58 @@ export default function ManageTeamScreen() {
         </Pressable>
       </Modal>
 
-      {/* ── Edit Rep Modal ── */}
+      {/* ── Action Modal ── */}
       <Modal
-        visible={editModalVisible}
+        visible={actionModalVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setEditModalVisible(false)}
+        onRequestClose={() => setActionModalVisible(false)}
       >
-        <Pressable style={styles.modalOverlay} onPress={() => setEditModalVisible(false)}>
+        <Pressable style={styles.modalOverlay} onPress={() => setActionModalVisible(false)}>
           <Pressable style={styles.modalSheet} onPress={() => {}}>
 
             <View style={styles.modalHeader}>
-              <Typography style={styles.modalTitle}>Edit Rep</Typography>
-              <Pressable onPress={() => setEditModalVisible(false)} hitSlop={12}>
+              <Typography style={styles.modalTitle}>
+                {selectedRep?.firstName} {selectedRep?.lastName}
+              </Typography>
+              <Pressable onPress={() => setActionModalVisible(false)} hitSlop={12}>
                 <Typography style={styles.modalClose}>✕</Typography>
               </Pressable>
             </View>
 
-            <View style={styles.fieldGroup}>
-              <Typography style={styles.fieldLabel}>First Name</Typography>
-              <TextInput
-                style={styles.input}
-                value={editFirstName}
-                onChangeText={setEditFirstName}
-                autoCapitalize="words"
-                placeholderTextColor={COLORS.textDisabled}
-              />
-            </View>
+            <Typography style={styles.actionSubtitle}>{selectedRep?.role}</Typography>
 
-            <View style={styles.fieldGroup}>
-              <Typography style={styles.fieldLabel}>Last Name</Typography>
-              <TextInput
-                style={styles.input}
-                value={editLastName}
-                onChangeText={setEditLastName}
-                autoCapitalize="words"
-                placeholderTextColor={COLORS.textDisabled}
-              />
-            </View>
+            {isRepInactive ? (
+              <Pressable
+                style={[styles.reactivateBtn, isActioning && styles.btnDisabled]}
+                onPress={handleReactivate}
+                disabled={isActioning}
+              >
+                {isActioning ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <Typography style={styles.actionBtnText}>Reactivate Access</Typography>
+                )}
+              </Pressable>
+            ) : (
+              <Pressable
+                style={[styles.revokeBtn, isActioning && styles.btnDisabled]}
+                onPress={handleRevokeAccess}
+                disabled={isActioning}
+              >
+                {isActioning ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <Typography style={styles.actionBtnText}>Revoke Access</Typography>
+                )}
+              </Pressable>
+            )}
 
             <Pressable
-              style={[styles.submitBtn, isSavingEdit && styles.submitBtnDisabled]}
-              onPress={handleSaveEdit}
-              disabled={isSavingEdit}
+              style={styles.cancelActionBtn}
+              onPress={() => setActionModalVisible(false)}
             >
-              {isSavingEdit ? (
-                <ActivityIndicator size="small" color={COLORS.white} />
-              ) : (
-                <Typography style={styles.submitBtnText}>Save Changes</Typography>
-              )}
+              <Typography style={styles.cancelActionBtnText}>Cancel</Typography>
             </Pressable>
 
           </Pressable>
@@ -379,6 +454,23 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
 
+  // Toggle
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
+    backgroundColor: COLORS.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  toggleLabel: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textSecondary,
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+
   // List
   list: {
     padding: SPACING.base,
@@ -402,6 +494,9 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.sm,
     paddingHorizontal: SPACING.base,
   },
+  repCardInactive: {
+    opacity: 0.55,
+  },
   repCardInner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -414,6 +509,9 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  avatarInactive: {
+    backgroundColor: COLORS.textMuted,
   },
   avatarText: {
     fontSize: FONT_SIZE.md,
@@ -428,10 +526,31 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.textPrimary,
   },
+  repNameInactive: {
+    color: COLORS.textMuted,
+  },
+  repRoleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    marginTop: 2,
+  },
   repRole: {
     fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
-    marginTop: 2,
+  },
+  inactiveBadge: {
+    backgroundColor: COLORS.border,
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  inactiveBadgeText: {
+    fontSize: 10,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
   },
   editBtn: {
     padding: SPACING.xs,
@@ -498,12 +617,49 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: SPACING.sm,
   },
-  submitBtnDisabled: {
-    opacity: 0.6,
-  },
   submitBtnText: {
     fontSize: FONT_SIZE.base,
     fontWeight: FONT_WEIGHT.bold,
     color: COLORS.white,
+  },
+  btnDisabled: {
+    opacity: 0.6,
+  },
+
+  // Action Modal
+  actionSubtitle: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textMuted,
+    marginTop: -SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
+  revokeBtn: {
+    backgroundColor: COLORS.error ?? '#d32f2f',
+    borderRadius: RADIUS.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  reactivateBtn: {
+    backgroundColor: COLORS.primary,
+    borderRadius: RADIUS.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  actionBtnText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.white,
+  },
+  cancelActionBtn: {
+    borderRadius: RADIUS.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+  },
+  cancelActionBtnText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textSecondary,
   },
 });

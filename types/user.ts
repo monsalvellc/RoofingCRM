@@ -17,6 +17,7 @@ export interface SalesRep {
   email: string;
   role: string;
   companyId: string;
+  isActive?: boolean;
   createdAt?: string | number;
   expiresAt?: string | number;
 }
@@ -27,9 +28,9 @@ export interface UserProfile {
   firstName: string;
   lastName: string;
   companyId: string;
-  role: 'SuperAdmin' | 'CompanyAdmin' | 'Sales' | 'User';
+  role: 'SuperAdmin' | 'CompanyAdmin' | 'Sales' | 'Production' | 'User';
   tags: string[];
-  isActive: boolean;
+  isActive?: boolean;
   createdAt: number;
   /** Feature-flag: admin can enable the HD toggle for this user. */
   allowHdToggle?: boolean;

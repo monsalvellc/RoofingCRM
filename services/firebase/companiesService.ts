@@ -7,6 +7,7 @@ import {
   getDocs,
   query,
   setDoc,
+  updateDoc,
   where,
 } from 'firebase/firestore';
 import Constants from 'expo-constants';
@@ -64,6 +65,30 @@ export async function createRepProfile(
   } catch (error) {
     console.error('[companiesService] createRepProfile failed:', error);
     throw new Error('Failed to save rep profile. Please try again.');
+  }
+}
+
+/**
+ * Soft-deletes a rep by setting isActive = false on their user document.
+ */
+export async function deactivateRep(userId: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, COLLECTIONS.users, userId), { isActive: false });
+  } catch (error) {
+    console.error('[companiesService] deactivateRep failed:', error);
+    throw new Error('Failed to revoke access. Please try again.');
+  }
+}
+
+/**
+ * Restores a previously deactivated rep by setting isActive = true.
+ */
+export async function reactivateRep(userId: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, COLLECTIONS.users, userId), { isActive: true });
+  } catch (error) {
+    console.error('[companiesService] reactivateRep failed:', error);
+    throw new Error('Failed to reactivate rep. Please try again.');
   }
 }
 

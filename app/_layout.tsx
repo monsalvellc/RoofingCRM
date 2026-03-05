@@ -73,6 +73,7 @@ function NavigationGuard() {
 
     const inAuthGroup = segments[0] === 'login';
     const onInactiveScreen = segments[0] === 'inactive-subscription';
+    const onAccessRevokedScreen = segments[0] === 'access-revoked';
 
     if (!user && !inAuthGroup) {
       router.replace('/login');
@@ -81,6 +82,12 @@ function NavigationGuard() {
 
     if (user && inAuthGroup) {
       router.replace('/(tabs)');
+      return;
+    }
+
+    // Revoked users — redirect regardless of subscription status.
+    if (user && userProfile?.isActive === false) {
+      if (!onAccessRevokedScreen) router.replace('/access-revoked');
       return;
     }
 
@@ -114,6 +121,7 @@ function NavigationGuard() {
     >
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="inactive-subscription" options={{ headerShown: false }} />
+      <Stack.Screen name="access-revoked" options={{ headerShown: false }} />
     </Stack>
   );
 }
