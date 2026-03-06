@@ -11,9 +11,11 @@ import {
   ScrollView,
   StyleSheet,
   Switch,
+  TextInput,
   View,
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -30,6 +32,7 @@ import {
 } from '../../hooks';
 import { useGetCustomer } from '../../hooks';
 import { useHdPhotoQuality } from '../../hooks';
+import { useAuth } from '../../context/AuthContext';
 import { Button, Card, Typography, TextInput as UITextInput } from '../../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
 import type { Job, JobFile, JobMedia } from '../../types';
@@ -99,6 +102,7 @@ function maskDate(raw: string): string {
 export default function JobDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const { userProfile } = useAuth();
 
   // ─── Server State (React Query) ───────────────────────────────────────────
   const { data: job, isLoading: isJobLoading, error: jobError } = useGetJob(id);
@@ -460,6 +464,12 @@ export default function JobDetailScreen() {
     ? `${customer.firstName} ${customer.lastName}`.trim()
     : '—';
 
+  // ─── Role-Based Access ────────────────────────────────────────────────────
+  const canViewFinances =
+    userProfile?.role === 'SuperAdmin' || userProfile?.role === 'Production';
+  const canEditSalesData =
+    userProfile?.role === 'SuperAdmin' || userProfile?.role === 'Sales';
+
   const hasInsurance =
     job.carrier || job.adjusterName || job.adjusterPhone || job.adjusterEmail ||
     job.claimNumber || job.deductible || job.dateOfLoss || job.dateOfDiscovery;
@@ -725,6 +735,9 @@ export default function JobDetailScreen() {
                 </Card>
               </>
             ) : null}
+
+            {/* Finances & Production — SuperAdmin and Production only */}
+            {canViewFinances && <ProductionFinances job={job} />}
           </>
         )}
 
@@ -1225,6 +1238,7 @@ export default function JobDetailScreen() {
                 numberOfLines={3}
                 textAlignVertical="top"
                 containerStyle={styles.multilineContainer}
+                editable={canEditSalesData}
               />
 
               <UITextInput
@@ -1258,6 +1272,7 @@ export default function JobDetailScreen() {
                 }
                 keyboardType="decimal-pad"
                 placeholder="0.00"
+                editable={canEditSalesData}
               />
 
               <UITextInput
@@ -1271,6 +1286,7 @@ export default function JobDetailScreen() {
                 }
                 keyboardType="decimal-pad"
                 placeholder="0.00"
+                editable={canEditSalesData}
               />
 
               {/* ── Insurance Section ── */}
@@ -1470,6 +1486,540 @@ export default function JobDetailScreen() {
     </>
   );
 }
+
+// ─── ProductionFinances ───────────────────────────────────────────────────────
+
+function ProductionFinances({ job }: { job: Job }) {
+  const { mutate: updateJobMutate, isPending: isSaving } = useUpdateJob();
+
+  // ── Material Ordered ─────────────────────────────────────────────────────
+  const toggleMaterialOrdered = (value: boolean) => {
+    updateJobMutate({
+      id: job.id,
+      data: {
+        materialOrdered: value,
+        materialOrderedDate: value ? Date.now() : null,
+      },
+    });
+  };
+
+  // ── Expected Delivery Date ────────────────────────────────────────────────
+  const [deliveryModalVisible, setDeliveryModalVisible] = useState(false);
+  const [deliveryInput, setDeliveryInput] = useState('');
+
+  const openDeliveryModal = () => {
+    const existing = job.expectedDeliveryDate
+      ? new Date(job.expectedDeliveryDate).toLocaleDateString('en-US', {
+          month: '2-digit',
+          day: '2-digit',
+          year: 'numeric',
+        })
+      : '';
+    setDeliveryInput(existing);
+    setDeliveryModalVisible(true);
+  };
+
+  const saveDeliveryDate = () => {
+    const parts = deliveryInput.split('/');
+    if (parts.length === 3) {
+      const ts = new Date(
+        parseInt(parts[2], 10),
+        parseInt(parts[0], 10) - 1,
+        parseInt(parts[1], 10),
+      ).getTime();
+      if (!isNaN(ts)) {
+        updateJobMutate({ id: job.id, data: { expectedDeliveryDate: ts } });
+      }
+    }
+    setDeliveryModalVisible(false);
+  };
+
+  // ── Add Cost Modal (shared for material & contractor) ─────────────────────
+  type CostType = 'material' | 'contractor';
+  const [addCostType, setAddCostType] = useState<CostType>('material');
+  const [addCostModalVisible, setAddCostModalVisible] = useState(false);
+  const [newCostAmount, setNewCostAmount] = useState('');
+  const [newCostNote, setNewCostNote] = useState('');
+
+  const openAddCost = (type: CostType) => {
+    setAddCostType(type);
+    setNewCostAmount('');
+    setNewCostNote('');
+    setAddCostModalVisible(true);
+  };
+
+  const saveNewCost = () => {
+    const amount = parseFloat(newCostAmount.replace(/[^0-9.]/g, ''));
+    if (!amount || amount <= 0) {
+      Alert.alert('Invalid Amount', 'Please enter a valid dollar amount.');
+      return;
+    }
+    const entry = {
+      id: Date.now().toString(),
+      amount,
+      note: newCostNote.trim() || '—',
+      dateAdded: Date.now(),
+    };
+    if (addCostType === 'material') {
+      const updated = [...(job.materialCosts ?? []), entry];
+      updateJobMutate({ id: job.id, data: { materialCosts: updated } });
+    } else {
+      const updated = [...(job.contractorCosts ?? []), entry];
+      updateJobMutate({ id: job.id, data: { contractorCosts: updated } });
+    }
+    setAddCostModalVisible(false);
+  };
+
+  // ── Material Returned ─────────────────────────────────────────────────────
+  const [returnedInput, setReturnedInput] = useState(
+    job.materialReturnedTotal ? String(job.materialReturnedTotal) : '',
+  );
+  const [returnedFocused, setReturnedFocused] = useState(false);
+
+  const saveReturned = () => {
+    const amount = parseFloat(returnedInput.replace(/[^0-9.]/g, '')) || 0;
+    updateJobMutate({ id: job.id, data: { materialReturnedTotal: amount } });
+    setReturnedFocused(false);
+  };
+
+  // ── Derived Totals ────────────────────────────────────────────────────────
+  const totalMaterial =
+    (job.materialCosts ?? []).reduce((s, c) => s + c.amount, 0) -
+    (job.materialReturnedTotal ?? 0);
+  const totalContractor = (job.contractorCosts ?? []).reduce((s, c) => s + c.amount, 0);
+  const totalJobCost = totalMaterial + totalContractor;
+
+  const fmt = (n: number) =>
+    n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
+  const fmtDate = (ts?: number | null) =>
+    ts
+      ? new Date(ts).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        })
+      : '—';
+
+  return (
+    <>
+      <Typography variant="label" color={COLORS.textMuted} style={prodStyles.sectionLabel}>
+        Finances &amp; Production
+      </Typography>
+
+      {/* ── Materials Tracking ── */}
+      <Card style={prodStyles.card}>
+        <Typography style={prodStyles.cardTitle}>Materials</Typography>
+
+        {/* Material Ordered toggle */}
+        <View style={prodStyles.switchRow}>
+          <View>
+            <Typography style={prodStyles.rowLabel}>Material Ordered</Typography>
+            {job.materialOrdered && job.materialOrderedDate ? (
+              <Typography style={prodStyles.rowSub}>
+                Ordered {fmtDate(job.materialOrderedDate)}
+              </Typography>
+            ) : null}
+          </View>
+          <Switch
+            value={!!job.materialOrdered}
+            onValueChange={toggleMaterialOrdered}
+            disabled={isSaving}
+            trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+            thumbColor={job.materialOrdered ? COLORS.primary : COLORS.background}
+          />
+        </View>
+
+        {/* Expected Delivery Date */}
+        <Pressable style={prodStyles.dateRow} onPress={openDeliveryModal}>
+          <View>
+            <Typography style={prodStyles.rowLabel}>Expected Delivery</Typography>
+            <Typography style={prodStyles.rowSub}>{fmtDate(job.expectedDeliveryDate)}</Typography>
+          </View>
+          <Ionicons name="calendar-outline" size={20} color={COLORS.primary} />
+        </Pressable>
+      </Card>
+
+      {/* ── Material Costs ── */}
+      <Card style={prodStyles.card}>
+        <View style={prodStyles.cardTitleRow}>
+          <Typography style={prodStyles.cardTitle}>Material Costs</Typography>
+          <Pressable onPress={() => openAddCost('material')} hitSlop={8}>
+            <Typography style={prodStyles.addLink}>+ Add</Typography>
+          </Pressable>
+        </View>
+
+        {(job.materialCosts ?? []).length === 0 ? (
+          <Typography style={prodStyles.emptyHint}>No material costs yet.</Typography>
+        ) : (
+          (job.materialCosts ?? []).map((c) => (
+            <View key={c.id} style={prodStyles.costRow}>
+              <Typography style={prodStyles.costNote}>{c.note}</Typography>
+              <Typography style={prodStyles.costAmount}>{fmt(c.amount)}</Typography>
+            </View>
+          ))
+        )}
+
+        {/* Material Returned */}
+        <View style={prodStyles.returnRow}>
+          <Typography style={prodStyles.rowLabel}>Material Returned ($)</Typography>
+          <View style={prodStyles.returnInputWrap}>
+            <TextInput
+              style={[prodStyles.returnInput, returnedFocused && prodStyles.returnInputFocused]}
+              value={returnedInput}
+              onChangeText={setReturnedInput}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor={COLORS.textDisabled}
+              onFocus={() => setReturnedFocused(true)}
+              onBlur={saveReturned}
+            />
+          </View>
+        </View>
+      </Card>
+
+      {/* ── Contractor Costs ── */}
+      <Card style={prodStyles.card}>
+        <View style={prodStyles.cardTitleRow}>
+          <Typography style={prodStyles.cardTitle}>Contractor Costs</Typography>
+          <Pressable onPress={() => openAddCost('contractor')} hitSlop={8}>
+            <Typography style={prodStyles.addLink}>+ Add</Typography>
+          </Pressable>
+        </View>
+
+        {(job.contractorCosts ?? []).length === 0 ? (
+          <Typography style={prodStyles.emptyHint}>No contractor costs yet.</Typography>
+        ) : (
+          (job.contractorCosts ?? []).map((c) => (
+            <View key={c.id} style={prodStyles.costRow}>
+              <Typography style={prodStyles.costNote}>{c.note}</Typography>
+              <Typography style={prodStyles.costAmount}>{fmt(c.amount)}</Typography>
+            </View>
+          ))
+        )}
+      </Card>
+
+      {/* ── Totals Card ── */}
+      <Card style={[prodStyles.card, prodStyles.totalsCard]}>
+        <Typography style={prodStyles.totalsTitle}>Job Cost Summary</Typography>
+        <View style={prodStyles.totalRow}>
+          <Typography style={prodStyles.totalLabel}>Total Materials</Typography>
+          <Typography style={prodStyles.totalValue}>{fmt(totalMaterial)}</Typography>
+        </View>
+        <View style={prodStyles.totalRow}>
+          <Typography style={prodStyles.totalLabel}>Total Contractors</Typography>
+          <Typography style={prodStyles.totalValue}>{fmt(totalContractor)}</Typography>
+        </View>
+        <View style={[prodStyles.totalRow, prodStyles.totalRowFinal]}>
+          <Typography style={prodStyles.totalLabelFinal}>Total Job Cost</Typography>
+          <Typography style={prodStyles.totalValueFinal}>{fmt(totalJobCost)}</Typography>
+        </View>
+      </Card>
+
+      {/* ── Delivery Date Modal ── */}
+      <Modal
+        visible={deliveryModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDeliveryModalVisible(false)}
+      >
+        <View style={prodStyles.modalOverlay}>
+          <View style={prodStyles.modalCard}>
+            <Typography style={prodStyles.modalTitle}>Expected Delivery Date</Typography>
+            <TextInput
+              style={prodStyles.modalInput}
+              value={deliveryInput}
+              onChangeText={(t) => setDeliveryInput(maskDate(t))}
+              keyboardType="numeric"
+              placeholder="MM/DD/YYYY"
+              placeholderTextColor={COLORS.textDisabled}
+              autoFocus
+            />
+            <View style={prodStyles.modalActions}>
+              <Pressable
+                style={[prodStyles.modalBtn, prodStyles.modalBtnCancel]}
+                onPress={() => setDeliveryModalVisible(false)}
+              >
+                <Typography style={prodStyles.modalBtnCancelText}>Cancel</Typography>
+              </Pressable>
+              <Pressable
+                style={[prodStyles.modalBtn, prodStyles.modalBtnSave]}
+                onPress={saveDeliveryDate}
+              >
+                <Typography style={prodStyles.modalBtnSaveText}>Save</Typography>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Add Cost Modal ── */}
+      <Modal
+        visible={addCostModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAddCostModalVisible(false)}
+      >
+        <View style={prodStyles.modalOverlay}>
+          <View style={prodStyles.modalCard}>
+            <Typography style={prodStyles.modalTitle}>
+              {addCostType === 'material' ? 'Add Material Cost' : 'Add Contractor Cost'}
+            </Typography>
+            <TextInput
+              style={prodStyles.modalInput}
+              value={newCostAmount}
+              onChangeText={setNewCostAmount}
+              keyboardType="decimal-pad"
+              placeholder="Amount ($)"
+              placeholderTextColor={COLORS.textDisabled}
+              autoFocus
+            />
+            <TextInput
+              style={[prodStyles.modalInput, { marginTop: SPACING.sm }]}
+              value={newCostNote}
+              onChangeText={setNewCostNote}
+              placeholder={addCostType === 'material' ? 'e.g. Extra Plywood' : 'e.g. Roofers'}
+              placeholderTextColor={COLORS.textDisabled}
+              autoCapitalize="words"
+            />
+            <View style={prodStyles.modalActions}>
+              <Pressable
+                style={[prodStyles.modalBtn, prodStyles.modalBtnCancel]}
+                onPress={() => setAddCostModalVisible(false)}
+              >
+                <Typography style={prodStyles.modalBtnCancelText}>Cancel</Typography>
+              </Pressable>
+              <Pressable
+                style={[prodStyles.modalBtn, prodStyles.modalBtnSave]}
+                onPress={saveNewCost}
+              >
+                <Typography style={prodStyles.modalBtnSaveText}>Save</Typography>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+const prodStyles = StyleSheet.create({
+  sectionLabel: {
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginTop: SPACING.lg,
+    marginBottom: SPACING.sm,
+  },
+  card: {
+    marginBottom: SPACING.sm,
+    padding: SPACING.base,
+    gap: SPACING.sm,
+  },
+  cardTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  cardTitle: {
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textPrimary,
+  },
+  addLink: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.primary,
+  },
+
+  // Rows
+  switchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs,
+  },
+  dateRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.divider,
+    marginTop: SPACING.xs,
+  },
+  rowLabel: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textPrimary,
+  },
+  rowSub: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+
+  // Cost list rows
+  costRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.divider,
+  },
+  costNote: {
+    fontSize: FONT_SIZE.base,
+    color: COLORS.textSecondary,
+    flex: 1,
+  },
+  costAmount: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textPrimary,
+  },
+
+  // Material returned
+  returnRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.divider,
+    marginTop: SPACING.xs,
+  },
+  returnInputWrap: {
+    width: 110,
+  },
+  returnInput: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: FONT_SIZE.base,
+    color: COLORS.textPrimary,
+    textAlign: 'right',
+  },
+  returnInputFocused: {
+    borderColor: COLORS.primary,
+  },
+
+  emptyHint: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textDisabled,
+    fontStyle: 'italic',
+  },
+
+  // Totals
+  totalsCard: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xl,
+  },
+  totalsTitle: {
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textPrimary,
+    marginBottom: SPACING.xs,
+  },
+  totalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.divider,
+  },
+  totalRowFinal: {
+    borderBottomWidth: 0,
+    marginTop: SPACING.xs,
+    paddingTop: SPACING.sm,
+    borderTopWidth: 2,
+    borderTopColor: COLORS.border,
+  },
+  totalLabel: {
+    fontSize: FONT_SIZE.base,
+    color: COLORS.textSecondary,
+  },
+  totalValue: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textPrimary,
+  },
+  totalLabelFinal: {
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textPrimary,
+  },
+  totalValueFinal: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.heavy,
+    color: COLORS.primary,
+  },
+
+  // Modals
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.xl,
+  },
+  modalCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    padding: SPACING.xl,
+    width: '100%',
+    gap: SPACING.sm,
+  },
+  modalTitle: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textPrimary,
+    marginBottom: SPACING.xs,
+  },
+  modalInput: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: FONT_SIZE.base,
+    color: COLORS.textPrimary,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: SPACING.md,
+    marginTop: SPACING.sm,
+  },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: 13,
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+  },
+  modalBtnCancel: {
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+  },
+  modalBtnSave: {
+    backgroundColor: COLORS.primary,
+  },
+  modalBtnCancelText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textSecondary,
+  },
+  modalBtnSaveText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.white,
+  },
+});
 
 // ─── Row sub-component ────────────────────────────────────────────────────────
 

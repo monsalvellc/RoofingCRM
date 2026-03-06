@@ -93,6 +93,7 @@ type CreateRepVars = {
   firstName: string;
   lastName: string;
   companyId: string;
+  role: 'Sales' | 'Production';
 };
 
 /**
@@ -102,7 +103,7 @@ type CreateRepVars = {
 export function useCreateRep() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, CreateRepVars>({
-    mutationFn: async ({ email, firstName, lastName, companyId }) => {
+    mutationFn: async ({ email, firstName, lastName, companyId, role }) => {
       const uid = await createAuthUserSecondary(email, 'Welcome123!');
       const now = new Date().toISOString();
       const expiresAt = new Date(
@@ -112,7 +113,7 @@ export function useCreateRep() {
         email,
         firstName,
         lastName,
-        role: 'Sales',
+        role,
         companyId,
         createdAt: now,
         expiresAt,

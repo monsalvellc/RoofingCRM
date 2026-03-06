@@ -1,5 +1,5 @@
 import { initializeApp, deleteApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { getAuth, createUserWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 import {
   collection,
   doc,
@@ -11,7 +11,7 @@ import {
   where,
 } from 'firebase/firestore';
 import Constants from 'expo-constants';
-import { db } from '../../config/firebaseConfig';
+import { auth, db } from '../../config/firebaseConfig';
 import { COLLECTIONS } from '../../constants/config';
 import type { Company, SalesRep } from '../../types';
 
@@ -88,6 +88,51 @@ export async function reactivateRep(userId: string): Promise<void> {
     await updateDoc(doc(db, COLLECTIONS.users, userId), { isActive: true });
   } catch (error) {
     console.error('[companiesService] reactivateRep failed:', error);
+    throw new Error('Failed to reactivate rep. Please try again.');
+  }
+}
+
+// ─── Magic Reactivation Helpers ───────────────────────────────────────────────
+
+/**
+ * Looks up a user document by email address (company-agnostic).
+ * Returns the SalesRep document if found, or null if no match.
+ */
+export async function checkUserByEmail(email: string): Promise<SalesRep | null> {
+  try {
+    const q = query(
+      collection(db, COLLECTIONS.users),
+      where('email', '==', email.toLowerCase().trim()),
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) return null;
+    const d = snap.docs[0];
+    return { id: d.id, ...d.data() } as SalesRep;
+  } catch (error) {
+    console.error('[companiesService] checkUserByEmail failed:', error);
+    throw new Error('Failed to look up user. Please try again.');
+  }
+}
+
+/**
+ * Reactivates an existing inactive rep: sets isActive = true, updates their
+ * name fields, and sends a password reset email so they can regain access.
+ */
+export async function magicReactivateRep(
+  userId: string,
+  email: string,
+  firstName: string,
+  lastName: string,
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, COLLECTIONS.users, userId), {
+      isActive: true,
+      firstName,
+      lastName,
+    });
+    await sendPasswordResetEmail(auth, email);
+  } catch (error) {
+    console.error('[companiesService] magicReactivateRep failed:', error);
     throw new Error('Failed to reactivate rep. Please try again.');
   }
 }

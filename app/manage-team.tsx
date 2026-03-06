@@ -15,7 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import { useGetCompany, useGetSalesReps, useCreateRep } from '../hooks';
-import { deactivateRep, reactivateRep } from '../services';
+import { checkUserByEmail, deactivateRep, magicReactivateRep, reactivateRep } from '../services';
 import { Card, Typography } from '../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../constants/theme';
 import type { SalesRep } from '../types';
@@ -46,6 +46,7 @@ export default function ManageTeamScreen() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
+  const [newRepRole, setNewRepRole] = useState<'Sales' | 'Production'>('Sales');
 
   // ─── Toggle & Derived Lists ──────────────────────────────────────────────────
   const [showInactive, setShowInactive] = useState(false);
@@ -71,20 +72,58 @@ export default function ManageTeamScreen() {
     setFirstName('');
     setLastName('');
     setEmail('');
+    setNewRepRole('Sales');
     setAddModalVisible(true);
   };
 
   const handleAddRep = async () => {
-    if (!firstName.trim() || !lastName.trim() || !email.trim()) {
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedFirst = firstName.trim();
+    const trimmedLast = lastName.trim();
+
+    if (!trimmedFirst || !trimmedLast || !trimmedEmail) {
       Alert.alert('Missing Fields', 'Please fill in all fields.');
       return;
     }
+
     try {
+      // ── Check if email already exists in Firestore ──
+      const existingUser = await checkUserByEmail(trimmedEmail);
+
+      if (existingUser) {
+        // Scenario A: already active — block creation.
+        if (existingUser.isActive !== false) {
+          Alert.alert('Error', 'A team member with this email is already active.');
+          return;
+        }
+
+        // Scenario B: inactive — attempt magic reactivation.
+        const allowedSeats = company?.allowedSeats ?? 0;
+        if (activeReps.length >= allowedSeats) {
+          Alert.alert(
+            'Seat Limit Reached',
+            'Cannot reactivate this user. You must upgrade your plan or revoke access from another member first.',
+          );
+          return;
+        }
+
+        await magicReactivateRep(existingUser.id, trimmedEmail, trimmedFirst, trimmedLast);
+        queryClient.invalidateQueries({ queryKey: ['users', 'salesReps', companyId] });
+        setAddModalVisible(false);
+        Alert.alert(
+          'Success',
+          'This email belonged to a previous team member. They have been reactivated and a password reset email has been sent to them.',
+        );
+        return;
+      }
+
+      // Scenario C: brand new user — proceed with normal creation flow.
       await createRep({
-        email: email.trim(),
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
+        email: trimmedEmail,
+        firstName: trimmedFirst,
+        lastName: trimmedLast,
         companyId,
+        role: newRepRole,
       });
       setAddModalVisible(false);
     } catch (err: any) {
@@ -301,6 +340,25 @@ export default function ManageTeamScreen() {
                 placeholderTextColor={COLORS.textDisabled}
                 autoCapitalize="words"
               />
+            </View>
+
+            <View style={styles.fieldGroup}>
+              <Typography style={styles.fieldLabel}>Role</Typography>
+              <View style={styles.roleRow}>
+                {(['Sales', 'Production'] as const).map((role) => (
+                  <Pressable
+                    key={role}
+                    style={[styles.roleChip, newRepRole === role && styles.roleChipActive]}
+                    onPress={() => setNewRepRole(role)}
+                  >
+                    <Typography
+                      style={[styles.roleChipText, newRepRole === role && styles.roleChipTextActive]}
+                    >
+                      {role}
+                    </Typography>
+                  </Pressable>
+                ))}
+              </View>
             </View>
 
             <View style={styles.fieldGroup}>
@@ -604,6 +662,31 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  roleRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  roleChip: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.background,
+  },
+  roleChipActive: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  roleChipText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textSecondary,
+  },
+  roleChipTextActive: {
+    color: COLORS.white,
   },
   passwordHint: {
     fontSize: FONT_SIZE.sm,

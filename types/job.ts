@@ -1,3 +1,10 @@
+export interface CostEntry {
+  id: string;
+  amount: number;
+  note: string;
+  dateAdded: number;
+}
+
 export interface MoneyRecord {
   id: string;
   amount: number;
@@ -90,6 +97,9 @@ export interface Job {
   installDate?: string;
   dateOrdered?: string;
   deliveryDate?: string;
+  materialOrdered?: boolean;
+  materialOrderedDate?: number | null;
+  expectedDeliveryDate?: number | null;
 
   // 6. Material Costs
   supplyStore?: string;
@@ -98,10 +108,13 @@ export interface Job {
   mainMaterialCost: number;
   additionalSpent: MoneyRecord[];
   returnedMaterialCredit: number;
+  materialCosts?: CostEntry[];
+  materialReturnedTotal?: number;
 
   // 7. Labor Costs
   installersCost: number;
   guttersCost: number;
+  contractorCosts?: CostEntry[];
 
   // 8. Files
   files: LeadFile[] | JobFile[];
