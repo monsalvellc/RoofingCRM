@@ -169,6 +169,11 @@ export default function JobDetailScreen() {
 
   const handleConfirmAddJob = () => {
     if (!job || isCreatingJob) return;
+    const trimmedJobName = newJobForm.jobName.trim();
+    if (!trimmedJobName) {
+      Alert.alert('Job Name Required', 'Please enter a job name before creating a job.');
+      return;
+    }
     createAdditionalJobMutate(
       {
         companyId: job.companyId,
@@ -176,7 +181,7 @@ export default function JobDetailScreen() {
         customerName: job.customerName ?? '',
         customerPhone: job.customerPhone ?? '',
         assignedUserIds: job.assignedUserIds ?? [],
-        jobName: newJobForm.jobName.trim() || undefined,
+        jobName: trimmedJobName,
         jobType: newJobForm.jobType,
       },
       {
@@ -192,10 +197,25 @@ export default function JobDetailScreen() {
   // ─── Handlers — Status ───────────────────────────────────────────────────
 
   const updateJobStatus = (newStatus: Job['status']) => {
+    if (!job) return;
     const payload: Partial<Job> = { status: newStatus };
     if (newStatus === 'Completed') payload.completedAt = new Date().toISOString();
     else payload.completedAt = null;
-    updateJobMutate({ id, data: payload });
+    const actorName = `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    const date = new Date().toLocaleDateString();
+    const jobLabel = job.jobName || 'this job';
+    updateJobMutate({
+      id,
+      data: payload,
+      historyEntry: {
+        customerId: job.customerId,
+        entry: `${actorName} updated ${jobLabel} status to ${newStatus} on ${date}`,
+      },
+      audit: {
+        actor: { id: userProfile?.id ?? '', name: actorName, companyId: userProfile?.companyId ?? '' },
+        action: 'STATUS_UPDATED',
+      },
+    });
   };
 
   // ─── Handlers — Modals ───────────────────────────────────────────────────
@@ -393,8 +413,22 @@ export default function JobDetailScreen() {
       dateOfDiscovery: editForm.dateOfDiscovery ?? job.dateOfDiscovery ?? '',
     };
 
+    const actorName = `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    const date = new Date().toLocaleDateString();
+    const jobLabel = updates.jobName || job.jobName || 'this job';
     updateJobMutate(
-      { id, data: updates },
+      {
+        id,
+        data: updates,
+        historyEntry: {
+          customerId: job.customerId,
+          entry: `${actorName} updated ${jobLabel} job details on ${date}`,
+        },
+        audit: {
+          actor: { id: userProfile?.id ?? '', name: actorName, companyId: userProfile?.companyId ?? '' },
+          action: 'JOB_DETAILS_UPDATED',
+        },
+      },
       {
         onSuccess: () => setIsEditingDetails(false),
         onError: () => Alert.alert('Error', 'Could not save changes.'),
@@ -408,7 +442,21 @@ export default function JobDetailScreen() {
       job.contractAmount -
       (newValue ? job.depositAmount || 0 : 0) -
       (job.payments || []).reduce((a: number, b: number) => a + b, 0);
-    updateJobMutate({ id, data: { isDepositPaid: newValue, balance: newBalance } });
+    const actorName = `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    const date = new Date().toLocaleDateString();
+    const jobLabel = job.jobName || 'this job';
+    updateJobMutate({
+      id,
+      data: { isDepositPaid: newValue, balance: newBalance },
+      historyEntry: {
+        customerId: job.customerId,
+        entry: `${actorName} updated ${jobLabel} deposit on ${date}`,
+      },
+      audit: {
+        actor: { id: userProfile?.id ?? '', name: actorName, companyId: userProfile?.companyId ?? '' },
+        action: 'DEPOSIT_UPDATED',
+      },
+    });
   };
 
   // ─── Handlers — Payments ─────────────────────────────────────────────────
@@ -426,8 +474,22 @@ export default function JobDetailScreen() {
       (job.isDepositPaid ? job.depositAmount ?? 0 : 0) -
       updatedPayments.reduce((sum: number, p: number) => sum + p, 0);
 
+    const actorName = `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    const date = new Date().toLocaleDateString();
+    const jobLabel = job.jobName || 'this job';
     updateJobMutate(
-      { id, data: { payments: updatedPayments, balance } },
+      {
+        id,
+        data: { payments: updatedPayments, balance },
+        historyEntry: {
+          customerId: job.customerId,
+          entry: `${actorName} updated ${jobLabel} payments on ${date}`,
+        },
+        audit: {
+          actor: { id: userProfile?.id ?? '', name: actorName, companyId: userProfile?.companyId ?? '' },
+          action: 'PAYMENT_ADDED',
+        },
+      },
       {
         onSuccess: () => {
           setNewPaymentAmount('');

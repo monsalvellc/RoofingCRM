@@ -124,11 +124,18 @@ export function useCreateAdditionalJob() {
   });
 }
 
+type UpdateJobVars = {
+  id: string;
+  data: Partial<Omit<Job, 'id'>>;
+  historyEntry?: { customerId: string; entry: string };
+  audit?: { actor: { id: string; name: string; companyId: string }; action: string };
+};
+
 /** Partially updates an existing job. Invalidates all job queries on success. */
 export function useUpdateJob() {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, { id: string; data: Partial<Omit<Job, 'id'>> }>({
-    mutationFn: ({ id, data }) => updateJob(id, data),
+  return useMutation<void, Error, UpdateJobVars>({
+    mutationFn: ({ id, data, historyEntry, audit }) => updateJob(id, data, historyEntry, audit),
     onSuccess: (_result, { id }) => {
       queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
       queryClient.invalidateQueries({ queryKey: jobKeys.all });

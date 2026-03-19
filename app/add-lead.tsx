@@ -196,6 +196,15 @@ export default function AddLeadScreen() {
     const inspectionPhotos = mediaFiles.filter((m) => m.category === 'inspection');
     const installPhotos = mediaFiles.filter((m) => m.category === 'install');
 
+    // Build actor for audit logging — null-safe so save never blocks on missing profile
+    const actor = userProfile
+      ? {
+          id: userProfile.id,
+          name: `${userProfile.firstName} ${userProfile.lastName}`.trim(),
+          companyId: userProfile.companyId,
+        }
+      : null;
+
     // Geocode silently — never blocks save on failure
     let locationCoords: { lat: number; lng: number } | null = null;
     try {
@@ -232,12 +241,7 @@ export default function AddLeadScreen() {
             updatedAt: now,
             isDeleted: false,
           },
-          creator: user?.uid
-            ? {
-                id: user.uid,
-                name: `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'Rep',
-              }
-            : null,
+          creator: actor,
         });
         customerId = newCustomer.id;
       }

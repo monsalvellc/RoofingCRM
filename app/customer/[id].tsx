@@ -65,6 +65,7 @@ export default function CustomerProfileScreen() {
   const fullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || '—';
   const assignedUserIds: string[] = customer.assignedUserIds ?? [];
   const assignmentHistory: string[] = customer.assignmentHistory ?? [];
+  const jobHistory: string[] = (customer as any).jobHistory ?? [];
 
   // ─── Handlers ────────────────────────────────────────────────────────────────
 
@@ -176,6 +177,18 @@ export default function CustomerProfileScreen() {
         <Typography style={styles.cardTitle}>Assignment History</Typography>
         {assignmentHistory.length > 0 ? (
           assignmentHistory.map((entry, i) => (
+            <Typography key={i} style={styles.historyText}>{entry}</Typography>
+          ))
+        ) : (
+          <Typography style={styles.emptyValue}>No history.</Typography>
+        )}
+      </Card>
+
+      {/* ── Job History ── */}
+      <Card elevation="sm" style={styles.cardGap}>
+        <Typography style={styles.cardTitle}>Job History</Typography>
+        {jobHistory.length > 0 ? (
+          [...jobHistory].reverse().map((entry, i) => (
             <Typography key={i} style={styles.historyText}>{entry}</Typography>
           ))
         ) : (

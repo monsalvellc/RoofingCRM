@@ -1,3 +1,7 @@
+export interface CompanyFeatures {
+  premiumHistory?: boolean;
+}
+
 export interface Company {
   id: string;
   name: string;
@@ -8,6 +12,8 @@ export interface Company {
   planInterval: 'month' | 'year';
   /** Firestore Timestamp, Date, or Unix milliseconds — normalize before comparing. */
   currentPeriodEnd: number | Date | any;
+  /** Feature flags controlled per-company by admins. */
+  features?: CompanyFeatures;
 }
 
 export interface SalesRep {

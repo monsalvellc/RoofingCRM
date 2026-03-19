@@ -14,6 +14,11 @@ import {
 import { db } from '../../config/firebaseConfig';
 import { COLLECTIONS } from '../../constants/config';
 import type { Customer } from '../../types/customer';
+import { createAuditLog } from './auditService';
+
+// Actor shape passed by callers who have auth context available.
+// All actor params are optional — audit logging silently skips if omitted.
+type AuditActor = { id: string; name: string; companyId: string };
 
 // ─── Internal Helper ──────────────────────────────────────────────────────────
 
@@ -143,6 +148,17 @@ export async function createCustomer(
     };
 
     const ref = await addDoc(collection(db, COLLECTIONS.customers), payload);
+    if (creator) {
+      await createAuditLog({
+        companyId: data.companyId,
+        entityId: ref.id,
+        entityType: 'CUSTOMER',
+        userId: creator.id,
+        userName: creator.name,
+        action: 'CUSTOMER_CREATED',
+        message: `${creator.name} created customer ${data.firstName} ${data.lastName}`,
+      });
+    }
     return { id: ref.id, ...payload };
   } catch (error) {
     console.error('[customersService] createCustomer failed:', error);
@@ -160,9 +176,21 @@ export async function createCustomer(
 export async function updateCustomer(
   id: string,
   data: Partial<Omit<Customer, 'id'>>,
+  actor?: AuditActor,
 ): Promise<void> {
   try {
     await updateDoc(doc(db, COLLECTIONS.customers, id), data as UpdateData<DocumentData>);
+    if (actor) {
+      await createAuditLog({
+        companyId: actor.companyId,
+        entityId: id,
+        entityType: 'CUSTOMER',
+        userId: actor.id,
+        userName: actor.name,
+        action: 'CUSTOMER_UPDATED',
+        message: `${actor.name} updated customer details`,
+      });
+    }
   } catch (error) {
     console.error('[customersService] updateCustomer failed:', error);
     throw new Error(`Failed to update customer "${id}". Please try again.`);
@@ -176,12 +204,23 @@ export async function updateCustomer(
  * The document is retained in Firestore for audit/recovery purposes.
  * @throws If the Firestore write fails.
  */
-export async function deleteCustomer(id: string): Promise<void> {
+export async function deleteCustomer(id: string, actor?: AuditActor): Promise<void> {
   try {
     await updateDoc(doc(db, COLLECTIONS.customers, id), {
       isDeleted: true,
-      updatedAt: Date.now(),
+      updatedAt: new Date().toISOString(),
     });
+    if (actor) {
+      await createAuditLog({
+        companyId: actor.companyId,
+        entityId: id,
+        entityType: 'CUSTOMER',
+        userId: actor.id,
+        userName: actor.name,
+        action: 'CUSTOMER_DELETED',
+        message: `${actor.name} deleted customer`,
+      });
+    }
   } catch (error) {
     console.error('[customersService] deleteCustomer failed:', error);
     throw new Error(`Failed to delete customer "${id}". Please try again.`);
@@ -199,6 +238,7 @@ export async function assignCustomerReps(
   customerId: string,
   selectedUserIds: string[],
   historyEntry: string,
+  actor?: AuditActor,
 ): Promise<void> {
   try {
     await updateDoc(doc(db, COLLECTIONS.customers, customerId), {
@@ -211,6 +251,17 @@ export async function assignCustomerReps(
     await Promise.all(
       jobsSnap.docs.map((d) => updateDoc(d.ref, { assignedUserIds: selectedUserIds })),
     );
+    if (actor) {
+      await createAuditLog({
+        companyId: actor.companyId,
+        entityId: customerId,
+        entityType: 'CUSTOMER',
+        userId: actor.id,
+        userName: actor.name,
+        action: 'CUSTOMER_ASSIGNED',
+        message: historyEntry,
+      });
+    }
   } catch (error) {
     console.error('[customersService] assignCustomerReps failed:', error);
     throw new Error('Failed to save assignments. Please try again.');

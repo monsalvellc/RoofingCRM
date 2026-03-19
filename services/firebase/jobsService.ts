@@ -14,6 +14,9 @@ import {
 import { db } from '../../config/firebaseConfig';
 import { COLLECTIONS } from '../../constants/config';
 import type { Job, JobFile, JobMedia } from '../../types/job';
+import { createAuditLog } from './auditService';
+
+type AuditActor = { id: string; name: string; companyId: string };
 
 // ─── Internal Helper ──────────────────────────────────────────────────────────
 
@@ -113,19 +116,31 @@ export async function getHdPhotoQuality(userId: string): Promise<number> {
  * @throws If the Firestore write fails.
  */
 
-    export async function createJob(data: Omit<Job, 'id'>): Promise<Job> {
+    export async function createJob(
+      data: Omit<Job, 'id'>,
+      actor?: { id: string; name: string },
+    ): Promise<Job> {
       try {
         const now = new Date().toISOString();
-        // Ensure isDeleted is set to false if not provided
-        const payload = { ...data, isDeleted: false, createdAt: now, updatedAt: now }; 
+        const payload = { ...data, isDeleted: false, createdAt: now, updatedAt: now };
         const ref = await addDoc(collection(db, COLLECTIONS.jobs), payload);
+        if (actor) {
+          await createAuditLog({
+            companyId: data.companyId,
+            entityId: ref.id,
+            entityType: 'JOB',
+            userId: actor.id,
+            userName: actor.name,
+            action: 'JOB_CREATED',
+            message: `${actor.name} created job${data.jobName ? ` "${data.jobName}"` : ''}`,
+          });
+        }
         return { id: ref.id, ...payload };
       } catch (error) {
-        // ...
-    console.error('[jobsService] createJob failed:', error);
-    throw new Error('Failed to create job. Please try again.');
-  }
-}
+        console.error('[jobsService] createJob failed:', error);
+        throw new Error('Failed to create job. Please try again.');
+      }
+    }
 
 /** Payload for creating a minimal linked job for an existing customer. */
 export interface AdditionalJobPayload {
@@ -144,7 +159,10 @@ export interface AdditionalJobPayload {
  * Returns the new Firestore document ID.
  * @throws If the Firestore write fails.
  */
-  export async function createAdditionalJob(payload: AdditionalJobPayload): Promise<string> {
+  export async function createAdditionalJob(
+    payload: AdditionalJobPayload,
+    actor?: { id: string; name: string },
+  ): Promise<string> {
     try {
       const now = new Date().toISOString();
       const docRef = await addDoc(collection(db, COLLECTIONS.jobs), {
@@ -152,16 +170,27 @@ export interface AdditionalJobPayload {
         status: 'Lead',
         contractAmount: 0,
         balance: 0,
-        isDeleted: false, // <--- ADD THIS LINE
+        isDeleted: false,
         createdAt: now,
         updatedAt: now,
       });
+      if (actor) {
+        await createAuditLog({
+          companyId: payload.companyId,
+          entityId: docRef.id,
+          entityType: 'JOB',
+          userId: actor.id,
+          userName: actor.name,
+          action: 'JOB_CREATED',
+          message: `${actor.name} created job${payload.jobName ? ` "${payload.jobName}"` : ''} for ${payload.customerName}`,
+        });
+      }
       return docRef.id;
     } catch (error) {
-    console.error('[jobsService] createAdditionalJob failed:', error);
-    throw new Error('Failed to create job. Please try again.');
+      console.error('[jobsService] createAdditionalJob failed:', error);
+      throw new Error('Failed to create job. Please try again.');
+    }
   }
-}
 
 // ─── Update ───────────────────────────────────────────────────────────────────
 
@@ -173,9 +202,27 @@ export interface AdditionalJobPayload {
 export async function updateJob(
   id: string,
   data: Partial<Omit<Job, 'id'>>,
+  historyEntry?: { customerId: string; entry: string },
+  audit?: { actor: AuditActor; action: string },
 ): Promise<void> {
   try {
     await updateDoc(doc(db, COLLECTIONS.jobs, id), data as UpdateData<DocumentData>);
+    if (historyEntry) {
+      await updateDoc(doc(db, COLLECTIONS.customers, historyEntry.customerId), {
+        jobHistory: arrayUnion(historyEntry.entry),
+      });
+    }
+    if (audit) {
+      await createAuditLog({
+        companyId: audit.actor.companyId,
+        entityId: id,
+        entityType: 'JOB',
+        userId: audit.actor.id,
+        userName: audit.actor.name,
+        action: audit.action,
+        message: historyEntry?.entry ?? `${audit.actor.name} updated job`,
+      });
+    }
   } catch (error) {
     console.error('[jobsService] updateJob failed:', error);
     throw new Error(`Failed to update job "${id}". Please try again.`);
@@ -255,13 +302,23 @@ export async function replaceJobMedia(
  * The document is retained in Firestore for audit/recovery purposes.
  * @throws If the Firestore write fails.
  */
-export async function deleteJob(id: string): Promise<void> {
+export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
   try {
     await updateDoc(doc(db, COLLECTIONS.jobs, id), {
       isDeleted: true,
-     // updatedAt: Date.now(),
-     updatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
+    if (actor) {
+      await createAuditLog({
+        companyId: actor.companyId,
+        entityId: id,
+        entityType: 'JOB',
+        userId: actor.id,
+        userName: actor.name,
+        action: 'JOB_DELETED',
+        message: `${actor.name} deleted job`,
+      });
+    }
   } catch (error) {
     console.error('[jobsService] deleteJob failed:', error);
     throw new Error(`Failed to delete job "${id}". Please try again.`);
