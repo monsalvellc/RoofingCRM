@@ -1,6 +1,7 @@
 import {
   arrayUnion,
   collection,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -170,16 +171,40 @@ export async function createCustomer(
 
 /**
  * Performs a partial update on an existing customer document.
- * Only the fields provided in `data` are modified; all others remain unchanged.
- * @throws If the document does not exist or the Firestore write fails.
+ * Always stamps `updatedAt`. When `historyEntry` is supplied it is appended to
+ * the customer's `jobHistory` array via arrayUnion (so the Job History card on
+ * the customer profile reflects the change without a separate write). When
+ * `actor` is supplied an audit_log document is written as well.
+ *
+ * Only the fields provided in `data` are modified; all others are untouched.
+ * @throws If the Firestore write fails.
  */
 export async function updateCustomer(
   id: string,
   data: Partial<Omit<Customer, 'id'>>,
   actor?: AuditActor,
+  historyEntry?: string,
 ): Promise<void> {
   try {
-    await updateDoc(doc(db, COLLECTIONS.customers, id), data as UpdateData<DocumentData>);
+    // Build the Firestore payload. We cast to `any` here because arrayUnion
+    // returns a FieldValue which is not assignable to the typed Customer fields
+    // — Firestore accepts it at runtime and the cast keeps TypeScript happy.
+    // Build payload manually so any undefined optional fields become deleteField()
+    // instead of being passed as-is — Firestore rejects raw undefined values.
+    const payload: Record<string, any> = { updatedAt: new Date().toISOString() };
+    for (const [key, val] of Object.entries(data as Record<string, any>)) {
+      payload[key] = val === undefined ? deleteField() : val;
+    }
+
+    // Append the history string to the jobHistory array on the customer doc.
+    // arrayUnion is idempotent — duplicates are ignored automatically.
+    if (historyEntry) {
+      payload.jobHistory = arrayUnion(historyEntry);
+    }
+
+    await updateDoc(doc(db, COLLECTIONS.customers, id), payload as UpdateData<DocumentData>);
+
+    // Write a structured audit log entry if the caller provided actor context.
     if (actor) {
       await createAuditLog({
         companyId: actor.companyId,
@@ -188,7 +213,7 @@ export async function updateCustomer(
         userId: actor.id,
         userName: actor.name,
         action: 'CUSTOMER_UPDATED',
-        message: `${actor.name} updated customer details`,
+        message: historyEntry ?? `${actor.name} updated customer details`,
       });
     }
   } catch (error) {
@@ -224,6 +249,37 @@ export async function deleteCustomer(id: string, actor?: AuditActor): Promise<vo
   } catch (error) {
     console.error('[customersService] deleteCustomer failed:', error);
     throw new Error(`Failed to delete customer "${id}". Please try again.`);
+  }
+}
+
+// ─── Deactivate (Hide) ────────────────────────────────────────────────────────
+
+/**
+ * Hides a customer (and all their associated jobs) from the pipeline by setting
+ * `isHidden: true`. The records are NOT deleted — they remain in Firestore and
+ * can be restored by setting `isHidden: false` directly in the console.
+ * @throws If the Firestore write fails.
+ */
+export async function deactivateCustomer(id: string, actor?: AuditActor): Promise<void> {
+  try {
+    await updateDoc(doc(db, COLLECTIONS.customers, id), {
+      isHidden: true,
+      updatedAt: new Date().toISOString(),
+    });
+    if (actor) {
+      await createAuditLog({
+        companyId: actor.companyId,
+        entityId: id,
+        entityType: 'CUSTOMER',
+        userId: actor.id,
+        userName: actor.name,
+        action: 'CUSTOMER_DEACTIVATED',
+        message: `${actor.name} deactivated customer`,
+      });
+    }
+  } catch (error) {
+    console.error('[customersService] deactivateCustomer failed:', error);
+    throw new Error(`Failed to deactivate customer "${id}". Please try again.`);
   }
 }
 

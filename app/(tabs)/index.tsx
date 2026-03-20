@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Modal,
   Pressable,
@@ -12,7 +13,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import { usePreferences } from '../../context/PreferencesContext';
-import { useGetAllJobs, useGetAllCustomers } from '../../hooks';
+import { useGetAllJobs, useGetAllCustomers, useDeactivateCustomer } from '../../hooks';
 import { Button, Card, Typography } from '../../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
 import type { Job } from '../../types';
@@ -110,6 +111,7 @@ export default function DashboardScreen() {
   // ─── Server State ───────────────────────────────────────────────────────────
   const { data: allJobs = [], isLoading, error } = useGetAllJobs(companyId);
   const { data: allCustomers = [] } = useGetAllCustomers(companyId);
+  const { mutate: deactivateCustomerMutate } = useDeactivateCustomer();
 
   // ─── Local UI State ─────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
@@ -141,12 +143,27 @@ export default function DashboardScreen() {
   }, [allJobs, viewMode, user?.uid]);
 
   // Group view-mode jobs by customer (one entry per customer, all their jobs inside).
+  // Hidden customers are excluded from personal/unassigned views but visible in
+  // the SuperAdmin "company" view so nothing is ever truly lost from oversight.
   const allCustomerGroups = useMemo(() => {
-    const map = new Map<string, { customerId: string; customerName: string; jobs: Job[] }>();
+    // Build a lookup of hidden customer IDs — only applies outside company view.
+    const hiddenIds =
+      viewMode !== 'company'
+        ? new Set(allCustomers.filter((c) => c.isHidden).map((c) => c.id))
+        : new Set<string>();
+
+    const map = new Map<string, { customerId: string; customerName: string; jobs: Job[]; isHidden: boolean }>();
     for (const job of viewModeJobs) {
       const cid = job.customerId;
+      if (hiddenIds.has(cid)) continue; // skip hidden customers in personal/unassigned
       if (!map.has(cid)) {
-        map.set(cid, { customerId: cid, customerName: job.customerName ?? '', jobs: [] });
+        const customerDoc = allCustomers.find((c) => c.id === cid);
+        map.set(cid, {
+          customerId: cid,
+          customerName: job.customerName ?? '',
+          jobs: [],
+          isHidden: customerDoc?.isHidden ?? false,
+        });
       }
       map.get(cid)!.jobs.push(job);
     }
@@ -156,7 +173,7 @@ export default function DashboardScreen() {
       const bNewest = Math.max(...b.jobs.map((j) => safeParseTime(j.createdAt)));
       return bNewest - aNewest;
     });
-  }, [viewModeJobs]);
+  }, [viewModeJobs, allCustomers, viewMode]);
 
   // Apply search + status + type filters to customer groups.
   const filteredCustomerGroups = useMemo(() => {
@@ -219,6 +236,34 @@ export default function DashboardScreen() {
     setStatusFilter(pendingStatus);
     setTypeFilter(pendingType);
     setIsFilterModalVisible(false);
+  };
+
+  const handleLongPressCard = (customerId: string, customerName: string) => {
+    // Only allow deactivation outside of the company view — in company view the
+    // card is shown for oversight and long-press would be confusing.
+    if (viewMode === 'company') return;
+
+    const actorName = `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    const actor = userProfile
+      ? { id: userProfile.id, name: actorName, companyId: userProfile.companyId }
+      : undefined;
+
+    Alert.alert(
+      'Hide Customer?',
+      `"${customerName}" and all their jobs will be hidden from the pipeline. This does not delete any data.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Hide',
+          style: 'destructive',
+          onPress: () =>
+            deactivateCustomerMutate(
+              { id: customerId, actor },
+              { onError: () => Alert.alert('Error', 'Could not hide customer. Please try again.') },
+            ),
+        },
+      ],
+    );
   };
 
   const clearFilters = () => {
@@ -393,14 +438,19 @@ export default function DashboardScreen() {
             };
 
             return (
-              <Pressable onPress={() => router.push(`/job/${activeJobId}`)}>
-                <Card elevation="sm" style={styles.jobCard}>
+              <Pressable
+                onPress={() => router.push(`/job/${activeJobId}`)}
+                onLongPress={() => handleLongPressCard(group.customerId, group.customerName)}
+                delayLongPress={500}
+              >
+                <Card elevation="sm" style={[styles.jobCard, group.isHidden && styles.jobCardHidden]}>
                   <View style={styles.cardTop}>
                     <View style={{ flex: 1, marginRight: SPACING.sm }}>
                       <Typography style={styles.leadName}>
                         {group.customerName || '—'}
                       </Typography>
                       <Typography style={styles.jobCountLabel}>
+                        {group.isHidden ? '⚠ Hidden  ·  ' : ''}
                         {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'}
                       </Typography>
                     </View>
@@ -690,6 +740,12 @@ const styles = StyleSheet.create({
   // Job Card (overrides applied on top of Card component defaults)
   jobCard: {
     gap: SPACING.xs,
+  },
+  jobCardHidden: {
+    opacity: 0.5,
+    borderWidth: 1,
+    borderColor: COLORS.danger,
+    borderStyle: 'dashed',
   },
   cardTop: {
     flexDirection: 'row',

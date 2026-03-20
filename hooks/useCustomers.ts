@@ -5,6 +5,7 @@ import {
   createCustomer,
   updateCustomer,
   deleteCustomer,
+  deactivateCustomer,
   assignCustomerReps,
 } from '../services';
 import type { Customer } from '../types/customer';
@@ -57,14 +58,39 @@ export function useCreateCustomer() {
   });
 }
 
-/** Partially updates an existing customer. Invalidates all customer queries on success. */
+type UpdateCustomerVars = {
+  id: string;
+  data: Partial<Omit<Customer, 'id'>>;
+  /** Optional history string appended to the customer's jobHistory array via arrayUnion. */
+  historyEntry?: string;
+  /** Optional actor for audit_log writing. Omit when no auth context is available. */
+  actor?: { id: string; name: string; companyId: string };
+};
+
+/** Partially updates an existing customer. Supports optional history and audit logging. */
 export function useUpdateCustomer() {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, { id: string; data: Partial<Omit<Customer, 'id'>> }>({
-    mutationFn: ({ id, data }) => updateCustomer(id, data),
+  return useMutation<void, Error, UpdateCustomerVars>({
+    mutationFn: ({ id, data, actor, historyEntry }) =>
+      updateCustomer(id, data, actor, historyEntry),
     onSuccess: (_result, { id }) => {
-      // Invalidate the specific detail entry and all list queries.
+      // Invalidate the specific detail entry and all list queries so the UI
+      // reflects the saved data and the Job History card refreshes.
       queryClient.invalidateQueries({ queryKey: customerKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: customerKeys.all });
+    },
+  });
+}
+
+/**
+ * Hides a customer (and all their jobs) from the pipeline by setting isHidden: true.
+ * The record is NOT deleted. Accepts an optional actor for audit logging.
+ */
+export function useDeactivateCustomer() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { id: string; actor?: { id: string; name: string; companyId: string } }>({
+    mutationFn: ({ id, actor }) => deactivateCustomer(id, actor),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: customerKeys.all });
     },
   });

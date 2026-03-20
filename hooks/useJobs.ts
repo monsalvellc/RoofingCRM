@@ -131,14 +131,23 @@ type UpdateJobVars = {
   audit?: { actor: { id: string; name: string; companyId: string }; action: string };
 };
 
-/** Partially updates an existing job. Invalidates all job queries on success. */
+/** Partially updates an existing job. Invalidates all job queries on success.
+ *  Also invalidates the customer detail query when a historyEntry is present,
+ *  because the service layer writes the entry to the customer's jobHistory field —
+ *  without this, the Job History card on the customer profile would show stale data.
+ */
 export function useUpdateJob() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, UpdateJobVars>({
     mutationFn: ({ id, data, historyEntry, audit }) => updateJob(id, data, historyEntry, audit),
-    onSuccess: (_result, { id }) => {
+    onSuccess: (_result, { id, historyEntry }) => {
       queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
       queryClient.invalidateQueries({ queryKey: jobKeys.all });
+      // If a history entry was written to the customer doc, invalidate that
+      // customer's cached data so the Job History card reflects the change.
+      if (historyEntry?.customerId) {
+        queryClient.invalidateQueries({ queryKey: ['customers', historyEntry.customerId] });
+      }
     },
   });
 }

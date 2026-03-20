@@ -13,6 +13,8 @@ export interface Customer {
   createdAt: number | string;
   updatedAt: number | string;
   isDeleted: boolean;
+  isHidden?: boolean;
   assignedUserIds?: string[];
   assignmentHistory?: string[];
+  jobHistory?: string[];
 }

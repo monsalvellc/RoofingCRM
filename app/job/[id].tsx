@@ -5,8 +5,10 @@ import {
   Dimensions,
   FlatList,
   Image,
+  KeyboardAvoidingView,
   Linking,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -30,7 +32,7 @@ import {
   useDeleteJobDocument,
   useCustomerJobsListener,
 } from '../../hooks';
-import { useGetCustomer } from '../../hooks';
+import { useGetCustomer, useUpdateCustomer } from '../../hooks';
 import { useHdPhotoQuality } from '../../hooks';
 import { useAuth } from '../../context/AuthContext';
 import { Button, Card, Typography, TextInput as UITextInput } from '../../components/ui';
@@ -107,6 +109,10 @@ export default function JobDetailScreen() {
   // ─── Server State (React Query) ───────────────────────────────────────────
   const { data: job, isLoading: isJobLoading, error: jobError } = useGetJob(id);
   const { data: customer } = useGetCustomer(job?.customerId ?? '');
+  const { mutate: updateCustomer, isPending: isUnhiding } = useUpdateCustomer();
+  // Separate instance so the edit-modal saving spinner is independent of the
+  // unhide banner's loading state.
+  const { mutate: updateCustomerFields, isPending: isCustomerSaving } = useUpdateCustomer();
   const { data: imageQuality = 0.75 } = useHdPhotoQuality();
   const { mutate: updateJobMutate, isPending: isUpdating } = useUpdateJob();
   const { mutate: createAdditionalJobMutate, isPending: isCreatingJob } = useCreateAdditionalJob();
@@ -143,6 +149,20 @@ export default function JobDetailScreen() {
 
   // Job tab bar
   const [activeJobTab, setActiveJobTab] = useState<'details' | 'media'>('details');
+
+  // Edit Customer modal — only fields that belong to the customer document.
+  // Job fields are intentionally excluded; this modal is customer-info only.
+  const [isEditingCustomer, setIsEditingCustomer] = useState(false);
+  const [customerEditForm, setCustomerEditForm] = useState({
+    firstName: '',
+    lastName: '',
+    phone: '',
+    email: '',
+    address: '',
+    alternateAddress: '',
+    leadSource: '',
+    notes: '',
+  });
 
   // Add Job modal
   const [isAddingJobModal, setIsAddingJobModal] = useState(false);
@@ -190,6 +210,73 @@ export default function JobDetailScreen() {
           router.setParams({ id: newId });
         },
         onError: () => Alert.alert('Error', 'Could not create job.'),
+      },
+    );
+  };
+
+  // ─── Handlers — Edit Customer ────────────────────────────────────────────
+  // Only SuperAdmin and Sales may open this modal (canEditSalesData guard is
+  // applied at the call site so these handlers are never reachable by Production).
+
+  /** Seeds the form with current customer values and opens the modal. */
+  const handleOpenEditCustomer = () => {
+    if (!customer) return;
+    setCustomerEditForm({
+      firstName: customer.firstName ?? '',
+      lastName: customer.lastName ?? '',
+      phone: customer.phone ?? '',
+      email: customer.email ?? '',
+      address: customer.address ?? '',
+      alternateAddress: customer.alternateAddress ?? '',
+      leadSource: customer.leadSource ?? '',
+      notes: customer.notes ?? '',
+    });
+    setIsEditingCustomer(true);
+  };
+
+  /** Validates, builds a history entry, and writes the customer update. */
+  const handleSaveEditCustomer = () => {
+    if (!job) return;
+    const firstName = customerEditForm.firstName.trim();
+    const lastName = customerEditForm.lastName.trim();
+    const address = customerEditForm.address.trim();
+
+    if (!firstName || !lastName) {
+      Alert.alert('Required', 'First and last name cannot be empty.');
+      return;
+    }
+    if (!address) {
+      Alert.alert('Required', 'Address cannot be empty.');
+      return;
+    }
+
+    const actorName =
+      `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    const actor = userProfile
+      ? { id: userProfile.id, name: actorName, companyId: userProfile.companyId }
+      : undefined;
+    const date = new Date().toLocaleDateString();
+    const customerFullName = `${firstName} ${lastName}`.trim();
+    const historyEntry = `${actorName} updated ${customerFullName}'s customer details on ${date}`;
+
+    // Strip empty optional strings to undefined — the service layer converts
+    // these to deleteField() so Firestore never receives raw undefined values.
+    const updates = {
+      firstName,
+      lastName,
+      address,
+      phone: customerEditForm.phone.trim() || undefined,
+      email: customerEditForm.email.trim() || undefined,
+      alternateAddress: customerEditForm.alternateAddress.trim() || undefined,
+      leadSource: customerEditForm.leadSource.trim() || undefined,
+      notes: customerEditForm.notes.trim() || undefined,
+    };
+
+    updateCustomerFields(
+      { id: job.customerId, data: updates, actor, historyEntry },
+      {
+        onSuccess: () => setIsEditingCustomer(false),
+        onError: () => Alert.alert('Error', 'Could not save changes. Please try again.'),
       },
     );
   };
@@ -416,17 +503,34 @@ export default function JobDetailScreen() {
     const actorName = `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
     const date = new Date().toLocaleDateString();
     const jobLabel = updates.jobName || job.jobName || 'this job';
+
+    // Use a contract-specific history entry when the contract amount changed so
+    // the Job History card clearly shows when the contract was updated rather
+    // than the generic "job details" message.
+    const contractChanged = contractAmount !== (job.contractAmount ?? 0);
+    const depositChanged = depositAmount !== (job.depositAmount ?? 0);
+    let historyEntryText: string;
+    if (contractChanged && depositChanged) {
+      historyEntryText = `${actorName} updated ${jobLabel} contract amount and deposit on ${date}`;
+    } else if (contractChanged) {
+      historyEntryText = `${actorName} updated ${jobLabel} contract amount on ${date}`;
+    } else if (depositChanged) {
+      historyEntryText = `${actorName} updated ${jobLabel} deposit amount on ${date}`;
+    } else {
+      historyEntryText = `${actorName} updated ${jobLabel} job details on ${date}`;
+    }
+
     updateJobMutate(
       {
         id,
         data: updates,
         historyEntry: {
           customerId: job.customerId,
-          entry: `${actorName} updated ${jobLabel} job details on ${date}`,
+          entry: historyEntryText,
         },
         audit: {
           actor: { id: userProfile?.id ?? '', name: actorName, companyId: userProfile?.companyId ?? '' },
-          action: 'JOB_DETAILS_UPDATED',
+          action: contractChanged ? 'CONTRACT_UPDATED' : 'JOB_DETAILS_UPDATED',
         },
       },
       {
@@ -546,17 +650,79 @@ export default function JobDetailScreen() {
       <Stack.Screen options={{ title: customerName || job.jobName || job.jobId }} />
       <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
 
+        {/* ── Unhide Banner ── */}
+        {customer?.isHidden && (
+          <Pressable
+            style={jobUnhideStyles.banner}
+            onPress={() =>
+              updateCustomer(
+                { id: job.customerId, data: { isHidden: false } },
+                { onError: () => Alert.alert('Error', 'Could not unhide customer. Please try again.') },
+              )
+            }
+            disabled={isUnhiding}
+          >
+            <Typography style={jobUnhideStyles.bannerText}>
+              {isUnhiding ? 'Restoring...' : 'Unhide ⚠'}
+            </Typography>
+          </Pressable>
+        )}
+
         {/* ── Customer Profile ── */}
-        <Typography variant="label" color={COLORS.textMuted} style={styles.sectionLabel}>
-          Customer
-        </Typography>
+        <View style={styles.sectionTitleRow}>
+          {/* marginTop:0 overrides the sectionLabel default since the row's
+              own marginTop already handles spacing from the element above. */}
+          <Typography variant="label" color={COLORS.textMuted} style={[styles.sectionLabel, { marginTop: 0, marginBottom: 0 }]}>
+            Customer
+          </Typography>
+          {/* Edit button — SuperAdmin and Sales only */}
+          {canEditSalesData && customer && (
+            <Button
+              variant="ghost"
+              size="sm"
+              label="✏️ Edit"
+              onPress={handleOpenEditCustomer}
+            />
+          )}
+        </View>
         <Card style={styles.infoCard}>
           <Row label="Name" value={customerName} />
-          <Row label="Address" value={customer?.address} />
-          {customer?.phone ? <Row label="Phone" value={customer.phone} /> : null}
+          {/* Address — tappable to open maps for navigation */}
+          {customer?.address ? (
+            <Row
+              label="Address"
+              value={customer.address}
+              onPress={() => {
+                const encoded = encodeURIComponent(customer.address);
+                const url = Platform.OS === 'ios'
+                  ? `maps:0,0?q=${encoded}`
+                  : `geo:0,0?q=${encoded}`;
+                Linking.openURL(url);
+              }}
+            />
+          ) : null}
+          {/* Phone — tappable to open the dialer */}
+          {customer?.phone ? (
+            <Row
+              label="Phone"
+              value={customer.phone}
+              onPress={() => Linking.openURL(`tel:${customer.phone!.replace(/\D/g, '')}`)}
+            />
+          ) : null}
           {customer?.email ? <Row label="Email" value={customer.email} /> : null}
+          {/* Alt address — also tappable */}
           {customer?.alternateAddress ? (
-            <Row label="Alt. Address" value={customer.alternateAddress} />
+            <Row
+              label="Alt. Address"
+              value={customer.alternateAddress}
+              onPress={() => {
+                const encoded = encodeURIComponent(customer.alternateAddress!);
+                const url = Platform.OS === 'ios'
+                  ? `maps:0,0?q=${encoded}`
+                  : `geo:0,0?q=${encoded}`;
+                Linking.openURL(url);
+              }}
+            />
           ) : null}
           {customer?.leadSource ? <Row label="Lead Source" value={customer.leadSource} /> : null}
           {customer?.notes ? <Row label="Notes" value={customer.notes} /> : null}
@@ -716,15 +882,29 @@ export default function JobDetailScreen() {
 
             {/* Financials */}
             <View style={styles.sectionTitleRow}>
-              <Typography variant="label" color={COLORS.textMuted} style={styles.sectionLabel}>
+              <Typography variant="label" color={COLORS.textMuted} style={[styles.sectionLabel, { marginTop: 0, marginBottom: 0 }]}>
                 Financials
               </Typography>
-              <Button
-                variant="ghost"
-                size="sm"
-                label="➕ Add Payment"
-                onPress={() => setIsAddingPayment(true)}
-              />
+              <View style={{ flexDirection: 'row', gap: SPACING.xs }}>
+                {/* Edit contract/deposit — SuperAdmin and Sales only */}
+                {canEditSalesData && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    label="✏️ Edit"
+                    onPress={() => {
+                      setEditForm({ ...job });
+                      setIsEditingDetails(true);
+                    }}
+                  />
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  label="➕ Add Payment"
+                  onPress={() => setIsAddingPayment(true)}
+                />
+              </View>
             </View>
             <Card style={styles.infoCard}>
               <Row
@@ -1439,6 +1619,172 @@ export default function JobDetailScreen() {
         </View>
       </Modal>
 
+      {/* ══════════════════════════════════════════════════════════════════════
+          EDIT CUSTOMER MODAL
+          Only renders customer fields — job fields are intentionally absent.
+          Accessible only to SuperAdmin and Sales (canEditSalesData guard on
+          the Edit button ensures Production can never open this modal).
+      ══════════════════════════════════════════════════════════════════════ */}
+      <Modal
+        visible={isEditingCustomer}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setIsEditingCustomer(false)}
+      >
+        <KeyboardAvoidingView
+          style={custEditStyles.outer}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          {/* Header */}
+          <View style={custEditStyles.header}>
+            <Typography style={custEditStyles.title}>Edit Customer</Typography>
+            <Pressable
+              onPress={() => setIsEditingCustomer(false)}
+              hitSlop={12}
+              style={custEditStyles.closeBtn}
+            >
+              <Typography style={custEditStyles.closeBtnText}>✕</Typography>
+            </Pressable>
+          </View>
+
+          <ScrollView
+            style={custEditStyles.scroll}
+            contentContainerStyle={custEditStyles.content}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* ── Contact ── */}
+            <Typography style={custEditStyles.sectionLabel}>Contact</Typography>
+
+            <CustEditField label="First Name *">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.firstName}
+                onChangeText={(v) => setCustomerEditForm((f) => ({ ...f, firstName: v }))}
+                placeholder="First name"
+                placeholderTextColor={COLORS.textDisabled}
+                autoCapitalize="words"
+                autoCorrect={false}
+              />
+            </CustEditField>
+
+            <CustEditField label="Last Name *">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.lastName}
+                onChangeText={(v) => setCustomerEditForm((f) => ({ ...f, lastName: v }))}
+                placeholder="Last name"
+                placeholderTextColor={COLORS.textDisabled}
+                autoCapitalize="words"
+                autoCorrect={false}
+              />
+            </CustEditField>
+
+            <CustEditField label="Phone">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.phone}
+                onChangeText={(v) =>
+                  setCustomerEditForm((f) => ({ ...f, phone: maskPhone(v) }))
+                }
+                placeholder="(555) 000-0000"
+                placeholderTextColor={COLORS.textDisabled}
+                keyboardType="phone-pad"
+              />
+            </CustEditField>
+
+            <CustEditField label="Email">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.email}
+                onChangeText={(v) => setCustomerEditForm((f) => ({ ...f, email: v }))}
+                placeholder="email@example.com"
+                placeholderTextColor={COLORS.textDisabled}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </CustEditField>
+
+            {/* ── Location ── */}
+            <Typography style={[custEditStyles.sectionLabel, custEditStyles.sectionLabelSpaced]}>
+              Location
+            </Typography>
+
+            <CustEditField label="Address *">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.address}
+                onChangeText={(v) => setCustomerEditForm((f) => ({ ...f, address: v }))}
+                placeholder="Street address"
+                placeholderTextColor={COLORS.textDisabled}
+                autoCapitalize="words"
+              />
+            </CustEditField>
+
+            <CustEditField label="Alternate Address">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.alternateAddress}
+                onChangeText={(v) =>
+                  setCustomerEditForm((f) => ({ ...f, alternateAddress: v }))
+                }
+                placeholder="Secondary address (optional)"
+                placeholderTextColor={COLORS.textDisabled}
+                autoCapitalize="words"
+              />
+            </CustEditField>
+
+            {/* ── Details ── */}
+            <Typography style={[custEditStyles.sectionLabel, custEditStyles.sectionLabelSpaced]}>
+              Details
+            </Typography>
+
+            <CustEditField label="Lead Source">
+              <TextInput
+                style={custEditStyles.input}
+                value={customerEditForm.leadSource}
+                onChangeText={(v) => setCustomerEditForm((f) => ({ ...f, leadSource: v }))}
+                placeholder="e.g. Door Knock, Referral"
+                placeholderTextColor={COLORS.textDisabled}
+                autoCapitalize="words"
+              />
+            </CustEditField>
+
+            <CustEditField label="Notes">
+              <TextInput
+                style={[custEditStyles.input, custEditStyles.inputMultiline]}
+                value={customerEditForm.notes}
+                onChangeText={(v) => setCustomerEditForm((f) => ({ ...f, notes: v }))}
+                placeholder="Internal notes about this customer..."
+                placeholderTextColor={COLORS.textDisabled}
+                multiline
+                numberOfLines={4}
+                textAlignVertical="top"
+                autoCapitalize="sentences"
+              />
+            </CustEditField>
+
+            <Typography style={custEditStyles.requiredNote}>* Required fields</Typography>
+          </ScrollView>
+
+          {/* Save — pinned above keyboard */}
+          <View style={custEditStyles.footer}>
+            <Pressable
+              style={[
+                custEditStyles.saveBtn,
+                isCustomerSaving && custEditStyles.saveBtnDisabled,
+              ]}
+              onPress={handleSaveEditCustomer}
+              disabled={isCustomerSaving}
+            >
+              <Typography style={custEditStyles.saveBtnText}>
+                {isCustomerSaving ? 'Saving...' : 'Save Changes'}
+              </Typography>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {/* ── Add Job Modal ── */}
       <Modal
         visible={isAddingJobModal}
@@ -1552,16 +1898,41 @@ export default function JobDetailScreen() {
 // ─── ProductionFinances ───────────────────────────────────────────────────────
 
 function ProductionFinances({ job }: { job: Job }) {
+  const { userProfile } = useAuth();
   const { mutate: updateJobMutate, isPending: isSaving } = useUpdateJob();
+
+  // Currency formatter — used in both history entries and the totals display.
+  const fmt = (n: number) =>
+    n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
+  // Shared helper — builds the actor + date values used in every history entry.
+  const buildActor = () => {
+    const name =
+      `${userProfile?.firstName ?? ''} ${userProfile?.lastName ?? ''}`.trim() || 'User';
+    return {
+      name,
+      actor: userProfile
+        ? { id: userProfile.id, name, companyId: userProfile.companyId }
+        : { id: '', name, companyId: '' },
+      date: new Date().toLocaleDateString(),
+      jobLabel: job.jobName || 'this job',
+    };
+  };
 
   // ── Material Ordered ─────────────────────────────────────────────────────
   const toggleMaterialOrdered = (value: boolean) => {
+    const { name, actor, date, jobLabel } = buildActor();
+    const entry = value
+      ? `${name} marked ${jobLabel} material as ordered on ${date}`
+      : `${name} marked ${jobLabel} material as not ordered on ${date}`;
     updateJobMutate({
       id: job.id,
       data: {
         materialOrdered: value,
         materialOrderedDate: value ? Date.now() : null,
       },
+      historyEntry: { customerId: job.customerId, entry },
+      audit: { actor, action: 'MATERIAL_ORDERED' },
     });
   };
 
@@ -1590,7 +1961,14 @@ function ProductionFinances({ job }: { job: Job }) {
         parseInt(parts[1], 10),
       ).getTime();
       if (!isNaN(ts)) {
-        updateJobMutate({ id: job.id, data: { expectedDeliveryDate: ts } });
+        const { name, actor, date, jobLabel } = buildActor();
+        const entry = `${name} set ${jobLabel} expected delivery date to ${deliveryInput} on ${date}`;
+        updateJobMutate({
+          id: job.id,
+          data: { expectedDeliveryDate: ts },
+          historyEntry: { customerId: job.customerId, entry },
+          audit: { actor, action: 'DELIVERY_DATE_SET' },
+        });
       }
     }
     setDeliveryModalVisible(false);
@@ -1616,18 +1994,33 @@ function ProductionFinances({ job }: { job: Job }) {
       Alert.alert('Invalid Amount', 'Please enter a valid dollar amount.');
       return;
     }
-    const entry = {
+    const noteText = newCostNote.trim() || '—';
+    const costEntry = {
       id: Date.now().toString(),
       amount,
-      note: newCostNote.trim() || '—',
+      note: noteText,
       dateAdded: Date.now(),
     };
+    const { name, actor, date, jobLabel } = buildActor();
+
     if (addCostType === 'material') {
-      const updated = [...(job.materialCosts ?? []), entry];
-      updateJobMutate({ id: job.id, data: { materialCosts: updated } });
+      const updated = [...(job.materialCosts ?? []), costEntry];
+      const entry = `${name} added material cost of ${fmt(amount)} (${noteText}) to ${jobLabel} on ${date}`;
+      updateJobMutate({
+        id: job.id,
+        data: { materialCosts: updated },
+        historyEntry: { customerId: job.customerId, entry },
+        audit: { actor, action: 'MATERIAL_COST_ADDED' },
+      });
     } else {
-      const updated = [...(job.contractorCosts ?? []), entry];
-      updateJobMutate({ id: job.id, data: { contractorCosts: updated } });
+      const updated = [...(job.contractorCosts ?? []), costEntry];
+      const entry = `${name} added contractor cost of ${fmt(amount)} (${noteText}) to ${jobLabel} on ${date}`;
+      updateJobMutate({
+        id: job.id,
+        data: { contractorCosts: updated },
+        historyEntry: { customerId: job.customerId, entry },
+        audit: { actor, action: 'CONTRACTOR_COST_ADDED' },
+      });
     }
     setAddCostModalVisible(false);
   };
@@ -1640,7 +2033,14 @@ function ProductionFinances({ job }: { job: Job }) {
 
   const saveReturned = () => {
     const amount = parseFloat(returnedInput.replace(/[^0-9.]/g, '')) || 0;
-    updateJobMutate({ id: job.id, data: { materialReturnedTotal: amount } });
+    const { name, actor, date, jobLabel } = buildActor();
+    const entry = `${name} updated ${jobLabel} material returned to ${fmt(amount)} on ${date}`;
+    updateJobMutate({
+      id: job.id,
+      data: { materialReturnedTotal: amount },
+      historyEntry: { customerId: job.customerId, entry },
+      audit: { actor, action: 'MATERIAL_RETURNED_UPDATED' },
+    });
     setReturnedFocused(false);
   };
 
@@ -1650,9 +2050,6 @@ function ProductionFinances({ job }: { job: Job }) {
     (job.materialReturnedTotal ?? 0);
   const totalContractor = (job.contractorCosts ?? []).reduce((s, c) => s + c.amount, 0);
   const totalJobCost = totalMaterial + totalContractor;
-
-  const fmt = (n: number) =>
-    n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
   const fmtDate = (ts?: number | null) =>
     ts
@@ -1864,6 +2261,135 @@ function ProductionFinances({ job }: { job: Job }) {
     </>
   );
 }
+
+// ─── CustEditField helper ─────────────────────────────────────────────────────
+// Labelled wrapper for each input inside the Edit Customer modal.
+
+function CustEditField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <View style={custEditStyles.fieldWrapper}>
+      <Typography style={custEditStyles.fieldLabel}>{label}</Typography>
+      {children}
+    </View>
+  );
+}
+
+// ─── Edit Customer Modal styles ───────────────────────────────────────────────
+
+const custEditStyles = StyleSheet.create({
+  outer: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.divider,
+    backgroundColor: COLORS.surface,
+  },
+  title: {
+    fontSize: FONT_SIZE.xl,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textPrimary,
+  },
+  closeBtn: {
+    padding: 4,
+  },
+  closeBtnText: {
+    fontSize: FONT_SIZE.lg,
+    color: COLORS.textSecondary,
+  },
+  scroll: {
+    flex: 1,
+  },
+  content: {
+    padding: SPACING.lg,
+    paddingBottom: SPACING.xl,
+    gap: SPACING.sm,
+  },
+  sectionLabel: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  sectionLabelSpaced: {
+    marginTop: SPACING.lg,
+  },
+  fieldWrapper: {
+    gap: 4,
+    marginBottom: SPACING.sm,
+  },
+  fieldLabel: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textSecondary,
+  },
+  input: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 11,
+    fontSize: FONT_SIZE.base,
+    color: COLORS.textPrimary,
+  },
+  inputMultiline: {
+    minHeight: 96,
+    paddingTop: 11,
+  },
+  requiredNote: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textDisabled,
+    marginTop: SPACING.sm,
+  },
+  footer: {
+    padding: SPACING.base,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.divider,
+    backgroundColor: COLORS.surface,
+  },
+  saveBtn: {
+    backgroundColor: COLORS.primary,
+    borderRadius: RADIUS.lg,
+    paddingVertical: 15,
+    alignItems: 'center',
+  },
+  saveBtnDisabled: {
+    opacity: 0.55,
+  },
+  saveBtnText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.white,
+  },
+});
+
+const jobUnhideStyles = StyleSheet.create({
+  banner: {
+    backgroundColor: '#FF4500',
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: RADIUS.md,
+    marginBottom: SPACING.sm,
+  },
+  bannerText: {
+    color: '#FFFFFF',
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.heavy,
+    letterSpacing: 0.5,
+  },
+});
 
 const prodStyles = StyleSheet.create({
   sectionLabel: {
@@ -2085,28 +2611,44 @@ const prodStyles = StyleSheet.create({
 
 // ─── Row sub-component ────────────────────────────────────────────────────────
 
-function Row({ label, value, mono }: { label: string; value?: string; mono?: boolean }) {
+function Row({
+  label,
+  value,
+  mono,
+  onPress,
+}: {
+  label: string;
+  value?: string;
+  mono?: boolean;
+  onPress?: () => void;
+}) {
   if (!value) return null;
+  const valueEl = (
+    <Typography
+      variant="body"
+      color={onPress ? COLORS.primary : COLORS.textPrimary}
+      numberOfLines={3}
+      style={[
+        { flex: 2, textAlign: 'right' },
+        mono && { fontFamily: 'monospace', fontSize: FONT_SIZE.sm },
+        !!onPress && { textDecorationLine: 'underline' },
+      ]}
+    >
+      {value}
+    </Typography>
+  );
   return (
     <View style={rowStyles.container}>
-      <Typography
-        variant="label"
-        color={COLORS.textMuted}
-        style={{ flex: 1 }}
-      >
+      <Typography variant="label" color={COLORS.textMuted} style={{ flex: 1 }}>
         {label}
       </Typography>
-      <Typography
-        variant="body"
-        color={COLORS.textPrimary}
-        numberOfLines={3}
-        style={[
-          { flex: 2, textAlign: 'right' },
-          mono && { fontFamily: 'monospace', fontSize: FONT_SIZE.sm },
-        ]}
-      >
-        {value}
-      </Typography>
+      {onPress ? (
+        <Pressable onPress={onPress} hitSlop={6} style={{ flex: 2 }}>
+          {valueEl}
+        </Pressable>
+      ) : (
+        valueEl
+      )}
     </View>
   );
 }
@@ -2159,6 +2701,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.base,
     paddingVertical: SPACING.xs,
   },
+
 
   // Pipeline status chips
   pipelineRow: {
