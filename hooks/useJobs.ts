@@ -73,26 +73,28 @@ export function useGetAllJobs(companyId: string) {
 /**
  * Subscribes to all jobs for a given customer using Firestore's onSnapshot.
  * Updates in real time whenever any job in the customer's portfolio changes.
- * Returns an empty array while `customerId` is falsy or while loading.
+ * Returns an empty array while `customerId` or `companyId` is falsy or while loading.
+ * The companyId filter is required for Firestore security rules to be satisfied.
  */
-export function useCustomerJobsListener(customerId: string) {
+export function useCustomerJobsListener(customerId: string, companyId: string) {
   const [jobs, setJobs] = useState<any[]>([]);
 
   useEffect(() => {
-    if (!customerId) {
+    if (!customerId || !companyId) {
       setJobs([]);
       return;
     }
     const q = query(
       collection(db, COLLECTIONS.jobs),
       where('customerId', '==', customerId),
+      where('companyId', '==', companyId),
       orderBy('createdAt', 'desc'),
     );
     const unsub = onSnapshot(q, (snap) => {
       setJobs(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
     return () => unsub();
-  }, [customerId]);
+  }, [customerId, companyId]);
 
   return jobs;
 }

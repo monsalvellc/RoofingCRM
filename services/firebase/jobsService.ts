@@ -18,14 +18,6 @@ import { createAuditLog } from './auditService';
 
 type AuditActor = { id: string; name: string; companyId: string };
 
-// ─── Token Generator ──────────────────────────────────────────────────────────
-
-const PORTAL_TOKEN_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-const generatePortalToken = (): string =>
-  Array.from({ length: 15 }, () =>
-    PORTAL_TOKEN_CHARSET[Math.floor(Math.random() * PORTAL_TOKEN_CHARSET.length)],
-  ).join('');
-
 // ─── Internal Helper ──────────────────────────────────────────────────────────
 
 /**
@@ -130,8 +122,11 @@ export async function getHdPhotoQuality(userId: string): Promise<number> {
     ): Promise<Job> {
       try {
         const now = new Date().toISOString();
-        const payload = { ...data, portalToken: generatePortalToken(), isDeleted: false, createdAt: now, updatedAt: now };
+        const payload = { ...data, isDeleted: false, createdAt: now, updatedAt: now };
         const ref = await addDoc(collection(db, COLLECTIONS.jobs), payload);
+        await updateDoc(doc(db, COLLECTIONS.customers, data.customerId), {
+          jobIds: arrayUnion(ref.id),
+        });
         if (actor) {
           await createAuditLog({
             companyId: data.companyId,
@@ -175,13 +170,15 @@ export interface AdditionalJobPayload {
       const now = new Date().toISOString();
       const docRef = await addDoc(collection(db, COLLECTIONS.jobs), {
         ...payload,
-        portalToken: generatePortalToken(),
         status: 'Lead',
         contractAmount: 0,
         balance: 0,
         isDeleted: false,
         createdAt: now,
         updatedAt: now,
+      });
+      await updateDoc(doc(db, COLLECTIONS.customers, payload.customerId), {
+        jobIds: arrayUnion(docRef.id),
       });
       if (actor) {
         await createAuditLog({

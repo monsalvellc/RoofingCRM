@@ -49,7 +49,6 @@ export interface Job {
   companyId: string;
   jobId: string;
   assignedUserIds: string[];
-  portalToken: string;
   status:
     | 'Lead'
     | 'Retail'

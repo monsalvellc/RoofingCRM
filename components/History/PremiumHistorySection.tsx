@@ -20,7 +20,13 @@ export function PremiumHistorySection({ entityId, entityType }: PremiumHistorySe
   const hasAccess = currentCompany?.features?.premiumHistory === true;
 
   if (hasAccess) {
-    return <ActiveHistoryList entityId={entityId} entityType={entityType} />;
+    return (
+      <ActiveHistoryList
+        entityId={entityId}
+        entityType={entityType}
+        companyId={currentCompany?.id ?? ''}
+      />
+    );
   }
 
   return (

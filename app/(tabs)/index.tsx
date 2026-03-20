@@ -6,6 +6,7 @@ import {
   Modal,
   Pressable,
   StyleSheet,
+  Switch,
   TextInput,
   View,
 } from 'react-native';
@@ -123,6 +124,9 @@ export default function DashboardScreen() {
   const [pendingStatus, setPendingStatus] = useState<Job['status'] | null>(null);
   const [pendingType, setPendingType] = useState<Job['jobType'] | null>(null);
 
+  // Live toggle — takes effect immediately, independent of the filter modal
+  const [hideCompleted, setHideCompleted] = useState(false);
+
   // SuperAdmin view mode toggle
   const [viewMode, setViewMode] = useState<'personal' | 'unassigned' | 'company'>('personal');
 
@@ -158,9 +162,12 @@ export default function DashboardScreen() {
       if (hiddenIds.has(cid)) continue; // skip hidden customers in personal/unassigned
       if (!map.has(cid)) {
         const customerDoc = allCustomers.find((c) => c.id === cid);
+        const liveCustomerName = customerDoc
+          ? `${customerDoc.firstName} ${customerDoc.lastName}`.trim()
+          : job.customerName ?? '';
         map.set(cid, {
           customerId: cid,
-          customerName: job.customerName ?? '',
+          customerName: liveCustomerName,
           jobs: [],
           isHidden: customerDoc?.isHidden ?? false,
         });
@@ -214,6 +221,12 @@ export default function DashboardScreen() {
       });
     }
 
+    if (hideCompleted) {
+      // Hide groups whose rolled-up display status is Completed.
+      // Groups that contain any Delinquent Payment job will surface as
+      // "Delinquent Payment" via getDisplayStatus, so they are never hidden.
+      result = result.filter((group) => getDisplayStatus(group.jobs) !== 'Completed');
+    }
     if (statusFilter) {
       result = result.filter((group) => getDisplayStatus(group.jobs) === statusFilter);
     }
@@ -222,7 +235,7 @@ export default function DashboardScreen() {
     }
 
     return result;
-  }, [allCustomerGroups, allCustomers, searchQuery, statusFilter, typeFilter]);
+  }, [allCustomerGroups, allCustomers, searchQuery, hideCompleted, statusFilter, typeFilter]);
 
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
@@ -271,6 +284,7 @@ export default function DashboardScreen() {
     setPendingType(null);
     setStatusFilter(null);
     setTypeFilter(null);
+    setHideCompleted(false);
     setIsFilterModalVisible(false);
   };
 
@@ -297,7 +311,7 @@ export default function DashboardScreen() {
 
   // ─── Derived display values ──────────────────────────────────────────────────
 
-  const isFiltering = !!searchQuery.trim() || !!statusFilter || !!typeFilter;
+  const isFiltering = !!searchQuery.trim() || !!statusFilter || !!typeFilter || hideCompleted;
   const activeFilterCount = (statusFilter ? 1 : 0) + (typeFilter ? 1 : 0);
 
   // ─── Render ──────────────────────────────────────────────────────────────────
@@ -380,6 +394,17 @@ export default function DashboardScreen() {
             </View>
           )}
         </Pressable>
+      </View>
+
+      {/* Hide Completed — live toggle, always visible */}
+      <View style={styles.hideCompletedRow}>
+        <Typography style={styles.hideCompletedLabel}>Hide Completed</Typography>
+        <Switch
+          value={hideCompleted}
+          onValueChange={setHideCompleted}
+          trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+          thumbColor={hideCompleted ? COLORS.primary : COLORS.background}
+        />
       </View>
 
       {/* Active filter summary pills */}
@@ -908,5 +933,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: SPACING.md,
     marginTop: SPACING.md,
+  },
+  hideCompletedRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    backgroundColor: COLORS.surface,
+  },
+  hideCompletedLabel: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textSecondary,
+    fontWeight: FONT_WEIGHT.semibold,
   },
 });

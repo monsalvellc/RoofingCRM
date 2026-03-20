@@ -21,6 +21,14 @@ import { createAuditLog } from './auditService';
 // All actor params are optional — audit logging silently skips if omitted.
 type AuditActor = { id: string; name: string; companyId: string };
 
+// ─── Token Generator ──────────────────────────────────────────────────────────
+
+const PORTAL_TOKEN_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const generatePortalToken = (): string =>
+  Array.from({ length: 15 }, () =>
+    PORTAL_TOKEN_CHARSET[Math.floor(Math.random() * PORTAL_TOKEN_CHARSET.length)],
+  ).join('');
+
 // ─── Internal Helper ──────────────────────────────────────────────────────────
 
 /**
@@ -143,6 +151,8 @@ export async function createCustomer(
       ...data,
       assignedUserIds: finalAssignments,
       assignmentHistory: [historyEntry], // <--- Starts the log!
+      portalToken: generatePortalToken(),
+      jobIds: [],
       isDeleted: false,
       createdAt: now,
       updatedAt: now,

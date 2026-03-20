@@ -102,16 +102,17 @@ function TimelineItem({ log, isLast }: { log: AuditLog; isLast: boolean }) {
 interface ActiveHistoryListProps {
   entityId: string;
   entityType: EntityType;
+  companyId: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function ActiveHistoryList({ entityId, entityType }: ActiveHistoryListProps) {
+export function ActiveHistoryList({ entityId, entityType, companyId }: ActiveHistoryListProps) {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (!entityId) {
+    if (!entityId || !companyId) {
       setIsLoading(false);
       return;
     }
@@ -120,6 +121,7 @@ export function ActiveHistoryList({ entityId, entityType }: ActiveHistoryListPro
 
     const q = query(
       collection(db, AUDIT_COLLECTION),
+      where('companyId', '==', companyId),
       where('entityId', '==', entityId),
       orderBy('createdAt', 'desc'),
       limit(RESULT_LIMIT),
@@ -142,7 +144,7 @@ export function ActiveHistoryList({ entityId, entityType }: ActiveHistoryListPro
     );
 
     return () => unsubscribe();
-  }, [entityId]);
+  }, [entityId, companyId]);
 
   // ─── Loading ──────────────────────────────────────────────────────────────
 

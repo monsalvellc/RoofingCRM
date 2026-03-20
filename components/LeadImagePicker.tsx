@@ -3,6 +3,7 @@ import {
   Alert,
   Image,
   Pressable,
+  ScrollView,
   StyleSheet,
   Switch,
   View,
@@ -69,7 +70,10 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
   const toggleFolderPermission = (cat: string, value: boolean) => {
     const next = { ...folderPermissions, [cat]: value };
     setFolderPermissions(next);
-    onUpdate(toJobMedia(files), next);
+    // Bulk-update all existing files in this folder to match the new folder toggle
+    const nextFiles = files.map((f) => (f.category === cat ? { ...f, isPublic: value } : f));
+    setFiles(nextFiles);
+    onUpdate(toJobMedia(nextFiles), next);
   };
 
   const toggleFilePublic = (fileId: string, value: boolean) => {
@@ -142,11 +146,40 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
     }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      selectionLimit: 10,
       quality: 0.7,
     });
     if (result.canceled || !result.assets?.length) return;
-    const asset = result.assets[0];
-    await processAndUpload(category, asset.uri, asset.fileName ?? undefined, 'image');
+
+    setUploading(category);
+    try {
+      const timestamp = Date.now();
+      const uploaded = await Promise.all(
+        result.assets.map(async (asset, i) => {
+          const filename = asset.fileName ?? `photo_${timestamp}_${i}.jpg`;
+          const url = await uploadLeadFile(companyId, category, asset.uri, filename);
+          const newFile: LeadFile = {
+            id: `${timestamp}_${i}`,
+            url,
+            name: filename,
+            type: 'image',
+            category,
+            isPublic: folderPermissions[category] ?? false,
+            createdAt: timestamp + i,
+            companyId,
+          };
+          return newFile;
+        }),
+      );
+      const nextFiles = [...files, ...uploaded];
+      setFiles(nextFiles);
+      onUpdate(toJobMedia(nextFiles), folderPermissions);
+    } catch (e: any) {
+      Alert.alert('Upload Failed', e.message);
+    } finally {
+      setUploading(null);
+    }
   };
 
   const pickDocument = async (category: string) => {
@@ -187,15 +220,17 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                   {cat} ({catFiles.length})
                 </Typography>
               </View>
-              <View style={styles.folderHeaderRight}>
-                <Typography style={styles.shareLabel}>Share</Typography>
-                <Switch
-                  value={folderPermissions[cat]}
-                  onValueChange={(v) => toggleFolderPermission(cat, v)}
-                  trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-                  thumbColor={folderPermissions[cat] ? COLORS.primary : COLORS.textDisabled}
-                />
-              </View>
+              {!isPdfCategory && (
+                <View style={styles.folderHeaderRight}>
+                  <Typography style={styles.shareLabel}>Share</Typography>
+                  <Switch
+                    value={folderPermissions[cat]}
+                    onValueChange={(v) => toggleFolderPermission(cat, v)}
+                    trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+                    thumbColor={folderPermissions[cat] ? COLORS.primary : COLORS.textDisabled}
+                  />
+                </View>
+              )}
             </Pressable>
 
             {/* Folder body */}
@@ -237,9 +272,13 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                   />
                 )}
 
-                {/* File grid */}
+                {/* File strip — horizontal scroll to keep layout light */}
                 {catFiles.length > 0 && (
-                  <View style={styles.photoGrid}>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.photoScrollContent}
+                  >
                     {catFiles.map((file) => (
                       <View key={file.id} style={styles.photoItem}>
                         {file.type === 'pdf' ? (
@@ -257,7 +296,7 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                         )}
                         <View style={styles.photoControls}>
                           <View style={styles.photoShareRow}>
-                            <Typography style={styles.photoShareLabel}>Public</Typography>
+                            <Typography style={styles.photoShareLabel}>Share</Typography>
                             <Switch
                               value={file.isPublic}
                               onValueChange={(v) => toggleFilePublic(file.id, v)}
@@ -276,7 +315,7 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                         </View>
                       </View>
                     ))}
-                  </View>
+                  </ScrollView>
                 )}
               </View>
             )}
@@ -357,18 +396,18 @@ const styles = StyleSheet.create({
 
   // PDF thumbnail
   pdfThumbnail: {
-    width: 140,
-    height: 100,
+    width: 90,
+    height: 80,
     backgroundColor: COLORS.secondaryBg,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: SPACING.sm,
+    padding: SPACING.xs,
   },
   pdfIcon: {
-    fontSize: FONT_SIZE.xl,
+    fontSize: FONT_SIZE.base,
     fontWeight: FONT_WEIGHT.heavy,
     color: COLORS.danger,
-    marginBottom: SPACING.xs,
+    marginBottom: 2,
   },
   pdfName: {
     fontSize: FONT_SIZE.xs,
@@ -376,14 +415,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Photo grid
-  photoGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  // Horizontal photo strip
+  photoScrollContent: {
     gap: SPACING.sm,
+    paddingVertical: SPACING.xs,
   },
   photoItem: {
-    width: 140,
+    width: 90,
     borderRadius: RADIUS.md,
     overflow: 'hidden',
     borderWidth: 1,
@@ -391,13 +429,13 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
   thumbnail: {
-    width: 140,
-    height: 100,
+    width: 90,
+    height: 80,
     resizeMode: 'cover',
   },
   photoControls: {
-    padding: SPACING.sm,
-    gap: SPACING.xs,
+    padding: SPACING.xs,
+    gap: 2,
   },
   photoShareRow: {
     flexDirection: 'row',
@@ -405,11 +443,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   photoShareLabel: {
-    fontSize: FONT_SIZE.sm,
+    fontSize: FONT_SIZE.xs,
     color: COLORS.textMuted,
   },
   smallSwitch: {
-    transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }],
+    transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }],
   },
   deleteButton: {
     alignSelf: 'center',

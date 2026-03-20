@@ -17,4 +17,6 @@ export interface Customer {
   assignedUserIds?: string[];
   assignmentHistory?: string[];
   jobHistory?: string[];
+  portalToken: string;
+  jobIds?: string[];
 }

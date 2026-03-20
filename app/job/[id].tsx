@@ -120,7 +120,7 @@ export default function JobDetailScreen() {
   const { mutate: deleteMediaMutate } = useDeleteJobMedia();
   const { mutate: addDocumentMutate, isPending: isUploadingDoc } = useAddJobDocument();
   const { mutate: deleteDocumentMutate } = useDeleteJobDocument();
-  const customerJobs = useCustomerJobsListener(job?.customerId ?? '');
+  const customerJobs = useCustomerJobsListener(job?.customerId ?? '', job?.companyId ?? '');
 
   const isUploading = isUploadingMedia || isUploadingDoc;
 
@@ -353,6 +353,43 @@ export default function JobDetailScreen() {
         onError: () => Alert.alert('Error', 'Could not update file.'),
       },
     );
+  };
+
+  // ─── Handlers — Inline Share Toggles ─────────────────────────────────────
+
+  const handleToggleFolderShare = (
+    photoField: 'inspectionPhotos' | 'installPhotos',
+    value: boolean,
+  ) => {
+    if (!job) return;
+    const folderKey = photoField === 'inspectionPhotos' ? 'Inspection' : 'Install';
+    const photos = ((job as any)[photoField] as JobMedia[]) ?? [];
+    const updatedPhotos = photos.map((p: JobMedia) => ({ ...p, shared: value }));
+    updateJobMutate({
+      id,
+      data: {
+        [photoField]: updatedPhotos,
+        folderPermissions: { ...(job.folderPermissions ?? {}), [folderKey]: value },
+      } as Partial<Job>,
+    });
+  };
+
+  const handleTogglePhotoShare = (photo: JobMedia, value: boolean) => {
+    if (!job) return;
+    const photoField = photo.category === 'inspection' ? 'inspectionPhotos' : 'installPhotos';
+    const photos = ((job as any)[photoField] as JobMedia[]) ?? [];
+    const updatedPhotos = photos.map((p: JobMedia) =>
+      p.id === photo.id ? { ...p, shared: value } : p,
+    );
+    updateJobMutate({ id, data: { [photoField]: updatedPhotos } as Partial<Job> });
+  };
+
+  const handleToggleDocShare = (file: JobFile, value: boolean) => {
+    if (!job) return;
+    const updatedFiles = (job.files as any[]).map((f: any) =>
+      f.id === file.id ? { ...f, isSharedWithCustomer: value } : f,
+    );
+    updateJobMutate({ id, data: { files: updatedFiles as any } });
   };
 
   const handleDeleteDocument = (file: JobFile) => {
@@ -990,6 +1027,7 @@ export default function JobDetailScreen() {
               const isDoc = sectionType === 'document';
               const photoField =
                 sectionType === 'inspection' ? 'inspectionPhotos' : 'installPhotos';
+              const folderKey = sectionType === 'inspection' ? 'Inspection' : 'Install';
               const photos: JobMedia[] = isDoc
                 ? []
                 : ((job as any)?.[photoField] ?? []).filter(
@@ -1006,13 +1044,36 @@ export default function JobDetailScreen() {
                   key={sectionType}
                   style={[styles.mediaSection, !isDoc && styles.mediaSectionDivider]}
                 >
-                  <Typography
-                    variant="label"
-                    color={COLORS.textMuted}
-                    style={styles.sectionLabel}
-                  >
-                    {label}
-                  </Typography>
+                  {/* Section header — photo folders get a "Share All" folder toggle */}
+                  <View style={styles.mediaSectionHeader}>
+                    <Typography
+                      variant="label"
+                      color={COLORS.textMuted}
+                      style={styles.sectionLabel}
+                    >
+                      {label}
+                    </Typography>
+                    {!isDoc && (
+                      <View style={styles.folderShareRow}>
+                        <Typography style={styles.folderShareLabel}>Share All</Typography>
+                        <Switch
+                          value={job.folderPermissions?.[folderKey] ?? false}
+                          onValueChange={(v) =>
+                            handleToggleFolderShare(
+                              photoField as 'inspectionPhotos' | 'installPhotos',
+                              v,
+                            )
+                          }
+                          trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+                          thumbColor={
+                            job.folderPermissions?.[folderKey]
+                              ? COLORS.primary
+                              : COLORS.background
+                          }
+                        />
+                      </View>
+                    )}
+                  </View>
 
                   {isDoc ? (
                     <>
@@ -2745,6 +2806,21 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.borderLight,
     paddingBottom: SPACING.base,
+  },
+  mediaSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  folderShareRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+  },
+  folderShareLabel: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textMuted,
   },
   photoButtonRow: {
     flexDirection: 'row',
