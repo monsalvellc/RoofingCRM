@@ -4,7 +4,6 @@ import {
   Alert,
   Dimensions,
   FlatList,
-  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -16,6 +15,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -26,14 +26,17 @@ import {
   useGetJob,
   useUpdateJob,
   useCreateAdditionalJob,
-  useUploadJobMedia,
   useDeleteJobMedia,
   useAddJobDocument,
   useDeleteJobDocument,
   useCustomerJobsListener,
+  useUploadQueue,
+  jobKeys,
 } from '../../hooks';
 import { useGetCustomer, useUpdateCustomer } from '../../hooks';
 import { useHdPhotoQuality } from '../../hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { uploadJobPhoto, appendJobMedia } from '../../services';
 import { useAuth } from '../../context/AuthContext';
 import { Button, Card, Typography, TextInput as UITextInput } from '../../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
@@ -116,13 +119,17 @@ export default function JobDetailScreen() {
   const { data: imageQuality = 0.75 } = useHdPhotoQuality();
   const { mutate: updateJobMutate, isPending: isUpdating } = useUpdateJob();
   const { mutate: createAdditionalJobMutate, isPending: isCreatingJob } = useCreateAdditionalJob();
-  const { mutate: uploadMediaMutate, isPending: isUploadingMedia } = useUploadJobMedia();
   const { mutate: deleteMediaMutate } = useDeleteJobMedia();
   const { mutate: addDocumentMutate, isPending: isUploadingDoc } = useAddJobDocument();
   const { mutate: deleteDocumentMutate } = useDeleteJobDocument();
   const customerJobs = useCustomerJobsListener(job?.customerId ?? '', job?.companyId ?? '');
+  const queryClient = useQueryClient();
 
-  const isUploading = isUploadingMedia || isUploadingDoc;
+  // Separate queue per photo folder — lets each section show its own in-flight items.
+  const inspectionQueue = useUploadQueue();
+  const installQueue = useUploadQueue();
+
+  const isUploading = isUploadingDoc;
 
   // ─── Local UI State ───────────────────────────────────────────────────────
 
@@ -454,15 +461,19 @@ export default function JobDetailScreen() {
       return;
     }
     const result = await ImagePicker.launchCameraAsync({ quality: imageQuality });
-    if (!result.canceled) {
-      uploadMediaMutate(
-        { jobId: id, photoType, uris: [result.assets[0].uri] },
-        {
-          onError: () =>
-            Alert.alert('Upload Failed', 'Could not upload photo. Please try again.'),
-        },
-      );
-    }
+    if (result.canceled) return;
+
+    const queue = photoType === 'inspectionPhotos' ? inspectionQueue : installQueue;
+    const taskId = Date.now().toString();
+    queue.enqueue([{
+      id: taskId,
+      sourceUri: result.assets[0].uri,
+      uploadFn: async (uri, onProgress) => {
+        const media = await uploadJobPhoto(id, photoType, uri, taskId, onProgress);
+        await appendJobMedia(id, photoType, media);
+        queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
+      },
+    }]);
   };
 
   const handleGalleryPhoto = async (photoType: 'inspectionPhotos' | 'installPhotos') => {
@@ -472,15 +483,21 @@ export default function JobDetailScreen() {
       allowsMultipleSelection: true,
       selectionLimit: 10,
     });
-    if (!result.canceled) {
-      uploadMediaMutate(
-        { jobId: id, photoType, uris: result.assets.map((a) => a.uri) },
-        {
-          onError: () =>
-            Alert.alert('Upload Failed', 'Could not upload photos. Please try again.'),
+    if (result.canceled) return;
+
+    const queue = photoType === 'inspectionPhotos' ? inspectionQueue : installQueue;
+    const timestamp = Date.now();
+    queue.enqueue(
+      result.assets.map((asset, i) => ({
+        id: `${timestamp}_${i}`,
+        sourceUri: asset.uri,
+        uploadFn: async (uri: string, onProgress: (p: number) => void) => {
+          const media = await uploadJobPhoto(id, photoType, uri, `${timestamp}_${i}`, onProgress);
+          await appendJobMedia(id, photoType, media);
+          queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
         },
-      );
-    }
+      })),
+    );
   };
 
   const handleDeletePhoto = (media: JobMedia) => {
@@ -1038,6 +1055,13 @@ export default function JobDetailScreen() {
                     (f: any) => f.type === 'document',
                   ) as JobFile[])
                 : [];
+              const photoQueue = isDoc
+                ? null
+                : sectionType === 'inspection'
+                  ? inspectionQueue
+                  : installQueue;
+              const queueItems = photoQueue?.items ?? [];
+              const hasPhotoContent = photos.length > 0 || queueItems.length > 0;
 
               return (
                 <View
@@ -1136,7 +1160,6 @@ export default function JobDetailScreen() {
                               photoField as 'inspectionPhotos' | 'installPhotos',
                             )
                           }
-                          isLoading={isUploading}
                           style={{ flex: 1 }}
                         />
                         <Button
@@ -1147,11 +1170,10 @@ export default function JobDetailScreen() {
                               photoField as 'inspectionPhotos' | 'installPhotos',
                             )
                           }
-                          isLoading={isUploading}
                           style={{ flex: 1 }}
                         />
                       </View>
-                      {photos.length > 0 ? (
+                      {hasPhotoContent ? (
                         <>
                           <ScrollView
                             horizontal
@@ -1161,6 +1183,7 @@ export default function JobDetailScreen() {
                               marginTop: SPACING.sm,
                             }}
                           >
+                            {/* Confirmed photos from Firestore */}
                             {photos.map((photo, i) => (
                               <Pressable
                                 key={photo.id}
@@ -1174,6 +1197,8 @@ export default function JobDetailScreen() {
                                   <Image
                                     source={{ uri: photo.url }}
                                     style={styles.photoHThumb}
+                                    contentFit="cover"
+                                    cachePolicy="disk"
                                   />
                                   {photo.shared && (
                                     <View style={styles.sharedBadge}>
@@ -1182,6 +1207,38 @@ export default function JobDetailScreen() {
                                   )}
                                 </View>
                               </Pressable>
+                            ))}
+                            {/* In-flight queue items — show local preview with overlay */}
+                            {queueItems.map((item) => (
+                              <View key={item.id} style={styles.queueThumbWrapper}>
+                                <Image
+                                  source={{ uri: item.cachedUri }}
+                                  style={[
+                                    styles.photoHThumb,
+                                    { opacity: item.status === 'failed' ? 0.35 : 0.65 },
+                                  ]}
+                                  contentFit="cover"
+                                />
+                                {(item.status === 'pending' || item.status === 'uploading') && (
+                                  <View style={styles.uploadOverlay}>
+                                    {item.status === 'uploading' ? (
+                                      <Typography style={styles.uploadProgress}>
+                                        {Math.round(item.progress * 100)}%
+                                      </Typography>
+                                    ) : (
+                                      <ActivityIndicator size="small" color={COLORS.white} />
+                                    )}
+                                  </View>
+                                )}
+                                {item.status === 'failed' && (
+                                  <Pressable
+                                    style={styles.retryOverlay}
+                                    onPress={() => photoQueue!.retryUpload(item.id)}
+                                  >
+                                    <Typography style={styles.retryLabel}>↺ Retry</Typography>
+                                  </Pressable>
+                                )}
+                              </View>
                             ))}
                           </ScrollView>
                           <Typography variant="caption" style={styles.photoHint}>
@@ -1263,7 +1320,8 @@ export default function JobDetailScreen() {
                 <Image
                   source={{ uri: item.url }}
                   style={{ width: SCREEN_WIDTH, height: VIEWER_PHOTO_HEIGHT }}
-                  resizeMode="contain"
+                  contentFit="contain"
+                  cachePolicy="disk"
                 />
               </ScrollView>
             )}
@@ -2909,6 +2967,39 @@ const styles = StyleSheet.create({
   photoHint: {
     fontStyle: 'italic',
     marginTop: SPACING.sm,
+  },
+
+  // Upload queue overlays
+  queueThumbWrapper: {
+    position: 'relative',
+    width: 80,
+    height: 80,
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+  },
+  uploadOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadProgress: {
+    color: COLORS.white,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
+  },
+  retryOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(180,0,0,0.6)',
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  retryLabel: {
+    color: COLORS.white,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
   },
 
   // ── Full-Screen Viewer ──

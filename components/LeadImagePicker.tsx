@@ -1,16 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   View,
 } from 'react-native';
+import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { uploadLeadFile } from '../services';
+import { useUploadQueue } from '../hooks/useUploadQueue';
 import type { JobMedia, LeadFile } from '../types';
 import { Button, Typography } from './ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../constants/theme';
@@ -27,6 +29,26 @@ const PHOTO_CATEGORY_MAP: Partial<Record<Category, JobMedia['category']>> = {
   Inspection: 'inspection',
   Install: 'install',
 };
+
+// ─── Pure helper (outside component — stable reference, no closure issues) ────
+
+/**
+ * Projects the internal LeadFile list into the JobMedia shape for the parent.
+ * Kept outside the component so it never needs to appear in a useEffect dep array.
+ */
+function toJobMedia(currentFiles: LeadFile[]): JobMedia[] {
+  return currentFiles
+    .filter(
+      (f) => f.type === 'image' && PHOTO_CATEGORY_MAP[f.category as Category] !== undefined,
+    )
+    .map((f) => ({
+      id: f.id,
+      url: f.url,
+      category: PHOTO_CATEGORY_MAP[f.category as Category]!,
+      shared: f.isPublic,
+      uploadedAt: new Date(f.createdAt).toISOString(),
+    }));
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,82 +67,95 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>(
     () => Object.fromEntries(CATEGORIES.map((c) => [c, false])),
   );
-  const [uploading, setUploading] = useState<string | null>(null);
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  // One queue per category — lets each folder show its own in-flight progress.
+  const inspectionQueue = useUploadQueue();
+  const installQueue = useUploadQueue();
+  const documentsQueue = useUploadQueue();
 
-  /** Projects the internal LeadFile list into the JobMedia shape for the parent. */
-  const toJobMedia = (currentFiles: LeadFile[]): JobMedia[] =>
-    currentFiles
-      .filter((f) => f.type === 'image' && PHOTO_CATEGORY_MAP[f.category as Category] !== undefined)
-      .map((f) => ({
-        id: f.id,
-        url: f.url,
-        category: PHOTO_CATEGORY_MAP[f.category as Category]!,
-        shared: f.isPublic,
-        uploadedAt: new Date(f.createdAt).toISOString(),
-      }));
+  const queueForCategory = (cat: string) => {
+    if (cat === 'Inspection') return inspectionQueue;
+    if (cat === 'Install') return installQueue;
+    return documentsQueue;
+  };
+
+  // ─── Parent sync via useEffect ────────────────────────────────────────────
+  //
+  // ALL calls to onUpdate live here — never inside render, never inside a
+  // setFiles functional updater, never inside an async uploadFn.
+  // Using a ref for onUpdate avoids adding a potentially-unstable prop function
+  // to the dependency array (which would cause the effect to re-run every render
+  // if the parent doesn't memoise it).
+
+  const onUpdateRef = useRef(onUpdate);
+  onUpdateRef.current = onUpdate; // always up to date, no dep-array churn
+
+  useEffect(() => {
+    onUpdateRef.current(toJobMedia(files), folderPermissions);
+  }, [files, folderPermissions]);
 
   // ─── Handlers ────────────────────────────────────────────────────────────────
+  //
+  // These only mutate local state. The useEffect above takes care of propagating
+  // changes to the parent, so no onUpdate call is needed here.
 
-  const toggleExpanded = (cat: string) => {
+  const toggleExpanded = (cat: string) =>
     setExpanded((prev) => ({ ...prev, [cat]: !prev[cat] }));
-  };
 
   const toggleFolderPermission = (cat: string, value: boolean) => {
-    const next = { ...folderPermissions, [cat]: value };
-    setFolderPermissions(next);
-    // Bulk-update all existing files in this folder to match the new folder toggle
-    const nextFiles = files.map((f) => (f.category === cat ? { ...f, isPublic: value } : f));
-    setFiles(nextFiles);
-    onUpdate(toJobMedia(nextFiles), next);
+    setFolderPermissions((prev) => ({ ...prev, [cat]: value }));
+    // Bulk-update all existing files in this folder to match the new folder toggle.
+    setFiles((prev) => prev.map((f) => (f.category === cat ? { ...f, isPublic: value } : f)));
   };
 
-  const toggleFilePublic = (fileId: string, value: boolean) => {
-    const next = files.map((f) => (f.id === fileId ? { ...f, isPublic: value } : f));
-    setFiles(next);
-    onUpdate(toJobMedia(next), folderPermissions);
-  };
+  const toggleFilePublic = (fileId: string, value: boolean) =>
+    setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, isPublic: value } : f)));
 
-  const deleteFile = (fileId: string) => {
-    const next = files.filter((f) => f.id !== fileId);
-    setFiles(next);
-    onUpdate(toJobMedia(next), folderPermissions);
-  };
+  const deleteFile = (fileId: string) =>
+    setFiles((prev) => prev.filter((f) => f.id !== fileId));
 
-  /** Core upload logic shared by camera, gallery, and document pickers. */
-  const processAndUpload = async (
+  // ─── Upload helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Builds a single queue task for one file.
+   * The uploadFn ONLY calls setFiles — it never calls onUpdate directly, which
+   * would risk a "setState during render" error if React batches the calls.
+   * The useEffect above handles propagating the new files list to the parent.
+   */
+  const buildTask = (
     category: string,
-    uri: string,
+    sourceUri: string,
     rawFilename: string | undefined,
     fileType: 'image' | 'pdf',
+    taskId: string,
+    timestamp: number,
   ) => {
-    const timestamp = Date.now();
     const ext = fileType === 'pdf' ? 'pdf' : 'jpg';
     const prefix = fileType === 'pdf' ? 'document' : 'photo';
     const filename = rawFilename ?? `${prefix}_${timestamp}.${ext}`;
+    // Capture folderPermissions at enqueue time — this is intentional so that
+    // the file's initial isPublic reflects the toggle state when the user pressed the button.
+    const isPublicAtEnqueue = folderPermissions[category] ?? false;
 
-    setUploading(category);
-    try {
-      const url = await uploadLeadFile(companyId, category, uri, filename);
-      const newFile: LeadFile = {
-        id: timestamp.toString(),
-        url,
-        name: filename,
-        type: fileType,
-        category,
-        isPublic: folderPermissions[category] ?? false,
-        createdAt: timestamp,
-        companyId,
-      };
-      const nextFiles = [...files, newFile];
-      setFiles(nextFiles);
-      onUpdate(toJobMedia(nextFiles), folderPermissions);
-    } catch (e: any) {
-      Alert.alert('Upload Failed', e.message);
-    } finally {
-      setUploading(null);
-    }
+    return {
+      id: taskId,
+      sourceUri,
+      uploadFn: async (uri: string, onProgress: (p: number) => void) => {
+        const url = await uploadLeadFile(companyId, category, uri, filename, onProgress);
+        const newFile: LeadFile = {
+          id: taskId,
+          url,
+          name: filename,
+          type: fileType,
+          category,
+          isPublic: isPublicAtEnqueue,
+          createdAt: timestamp,
+          companyId,
+        };
+        // Plain functional updater — no side-effects, no onUpdate call here.
+        setFiles((prev) => [...prev, newFile]);
+      },
+    };
   };
 
   const pickFromCamera = async (category: string) => {
@@ -129,13 +164,15 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
       Alert.alert('Permission Required', 'Please allow camera access to take photos.');
       return;
     }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      quality: 0.7,
-    });
+    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.7 });
     if (result.canceled || !result.assets?.length) return;
+
     const asset = result.assets[0];
-    await processAndUpload(category, asset.uri, asset.fileName ?? undefined, 'image');
+    const timestamp = Date.now();
+    const taskId = `${timestamp}_cam`;
+    queueForCategory(category).enqueue([
+      buildTask(category, asset.uri, asset.fileName ?? undefined, 'image', taskId, timestamp),
+    ]);
   };
 
   const pickFromGallery = async (category: string) => {
@@ -152,34 +189,19 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
     });
     if (result.canceled || !result.assets?.length) return;
 
-    setUploading(category);
-    try {
-      const timestamp = Date.now();
-      const uploaded = await Promise.all(
-        result.assets.map(async (asset, i) => {
-          const filename = asset.fileName ?? `photo_${timestamp}_${i}.jpg`;
-          const url = await uploadLeadFile(companyId, category, asset.uri, filename);
-          const newFile: LeadFile = {
-            id: `${timestamp}_${i}`,
-            url,
-            name: filename,
-            type: 'image',
-            category,
-            isPublic: folderPermissions[category] ?? false,
-            createdAt: timestamp + i,
-            companyId,
-          };
-          return newFile;
-        }),
-      );
-      const nextFiles = [...files, ...uploaded];
-      setFiles(nextFiles);
-      onUpdate(toJobMedia(nextFiles), folderPermissions);
-    } catch (e: any) {
-      Alert.alert('Upload Failed', e.message);
-    } finally {
-      setUploading(null);
-    }
+    const timestamp = Date.now();
+    queueForCategory(category).enqueue(
+      result.assets.map((asset, i) =>
+        buildTask(
+          category,
+          asset.uri,
+          asset.fileName ?? undefined,
+          'image',
+          `${timestamp}_${i}`,
+          timestamp + i,
+        ),
+      ),
+    );
   };
 
   const pickDocument = async (category: string) => {
@@ -188,8 +210,13 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
       copyToCacheDirectory: true,
     });
     if (result.canceled || !result.assets?.length) return;
+
     const asset = result.assets[0];
-    await processAndUpload(category, asset.uri, asset.name ?? undefined, 'pdf');
+    const timestamp = Date.now();
+    const taskId = `${timestamp}_doc`;
+    queueForCategory(category).enqueue([
+      buildTask(category, asset.uri, asset.name ?? undefined, 'pdf', taskId, timestamp),
+    ]);
   };
 
   const categoryFiles = (cat: string) => files.filter((f) => f.category === cat);
@@ -201,23 +228,20 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
       {CATEGORIES.map((cat) => {
         const catFiles = categoryFiles(cat);
         const isExpanded = expanded[cat];
-        const isUploading = uploading === cat;
         const isPdfCategory = PDF_CATEGORIES.has(cat);
+        const catQueue = queueForCategory(cat);
+        const catQueueItems = catQueue.items;
+        const hasContent = catFiles.length > 0 || catQueueItems.length > 0;
 
         return (
           <View key={cat} style={styles.folder}>
 
-            {/* Folder header — Pressable kept for multi-content row (text + switch) */}
-            <Pressable
-              style={styles.folderHeader}
-              onPress={() => toggleExpanded(cat)}
-            >
+            {/* Folder header */}
+            <Pressable style={styles.folderHeader} onPress={() => toggleExpanded(cat)}>
               <View style={styles.folderHeaderLeft}>
-                <Typography style={styles.folderArrow}>
-                  {isExpanded ? '▼' : '▶'}
-                </Typography>
+                <Typography style={styles.folderArrow}>{isExpanded ? '▼' : '▶'}</Typography>
                 <Typography style={styles.folderName}>
-                  {cat} ({catFiles.length})
+                  {cat} ({catFiles.length + catQueueItems.length})
                 </Typography>
               </View>
               {!isPdfCategory && (
@@ -237,15 +261,13 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
             {isExpanded && (
               <View style={styles.folderBody}>
 
-                {/* Camera + Gallery buttons side-by-side */}
+                {/* Camera + Gallery buttons */}
                 <View style={styles.actionRow}>
                   <Button
                     variant="outline"
                     size="sm"
                     label="Camera 📷"
                     onPress={() => pickFromCamera(cat)}
-                    disabled={isUploading}
-                    isLoading={isUploading}
                     style={styles.addPhotoButton}
                   />
                   <Button
@@ -253,32 +275,29 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                     size="sm"
                     label="Gallery 📂"
                     onPress={() => pickFromGallery(cat)}
-                    disabled={isUploading}
-                    isLoading={isUploading}
                     style={styles.addPhotoButton}
                   />
                 </View>
 
-                {/* PDF button on its own row (Documents folder only) */}
+                {/* PDF button — Documents folder only */}
                 {isPdfCategory && (
                   <Button
                     variant="outline"
                     size="sm"
                     label="+ Add PDF"
                     onPress={() => pickDocument(cat)}
-                    disabled={isUploading}
-                    isLoading={isUploading}
                     style={styles.addDocButton}
                   />
                 )}
 
-                {/* File strip — horizontal scroll to keep layout light */}
-                {catFiles.length > 0 && (
+                {/* Horizontal strip — confirmed files + in-flight queue items */}
+                {hasContent && (
                   <ScrollView
                     horizontal
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.photoScrollContent}
                   >
+                    {/* Confirmed uploaded files */}
                     {catFiles.map((file) => (
                       <View key={file.id} style={styles.photoItem}>
                         {file.type === 'pdf' ? (
@@ -292,6 +311,8 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                           <Image
                             source={{ uri: file.url }}
                             style={styles.thumbnail}
+                            contentFit="cover"
+                            cachePolicy="disk"
                           />
                         )}
                         <View style={styles.photoControls}>
@@ -315,6 +336,39 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
                         </View>
                       </View>
                     ))}
+
+                    {/* In-flight queue items — local preview with status overlay */}
+                    {catQueueItems.map((item) => (
+                      <View key={item.id} style={styles.queueItem}>
+                        <Image
+                          source={{ uri: item.cachedUri }}
+                          style={[
+                            styles.thumbnail,
+                            { opacity: item.status === 'failed' ? 0.35 : 0.6 },
+                          ]}
+                          contentFit="cover"
+                        />
+                        {(item.status === 'pending' || item.status === 'uploading') && (
+                          <View style={styles.uploadOverlay}>
+                            {item.status === 'uploading' ? (
+                              <Typography style={styles.uploadProgress}>
+                                {Math.round(item.progress * 100)}%
+                              </Typography>
+                            ) : (
+                              <ActivityIndicator size="small" color={COLORS.white} />
+                            )}
+                          </View>
+                        )}
+                        {item.status === 'failed' && (
+                          <Pressable
+                            style={styles.retryOverlay}
+                            onPress={() => catQueue.retryUpload(item.id)}
+                          >
+                            <Typography style={styles.retryLabel}>↺ Retry</Typography>
+                          </Pressable>
+                        )}
+                      </View>
+                    ))}
                   </ScrollView>
                 )}
               </View>
@@ -333,7 +387,6 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
   },
 
-  // Folder wrapper
   folder: {
     backgroundColor: COLORS.surface,
     borderRadius: RADIUS.lg,
@@ -372,13 +425,11 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
 
-  // Folder body
   folderBody: {
     padding: SPACING.md,
     gap: SPACING.md,
   },
 
-  // Action buttons
   actionRow: {
     flexDirection: 'row',
     gap: SPACING.sm,
@@ -394,7 +445,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.secondaryBg,
   },
 
-  // PDF thumbnail
   pdfThumbnail: {
     width: 90,
     height: 80,
@@ -415,7 +465,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Horizontal photo strip
   photoScrollContent: {
     gap: SPACING.sm,
     paddingVertical: SPACING.xs,
@@ -431,7 +480,6 @@ const styles = StyleSheet.create({
   thumbnail: {
     width: 90,
     height: 80,
-    resizeMode: 'cover',
   },
   photoControls: {
     padding: SPACING.xs,
@@ -451,5 +499,37 @@ const styles = StyleSheet.create({
   },
   deleteButton: {
     alignSelf: 'center',
+  },
+
+  queueItem: {
+    width: 90,
+    height: 80,
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    position: 'relative',
+  },
+  uploadOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadProgress: {
+    color: COLORS.white,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
+  },
+  retryOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(180,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  retryLabel: {
+    color: COLORS.white,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
   },
 });
