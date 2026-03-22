@@ -7,6 +7,8 @@ import {
   query,
   where,
 } from 'firebase/firestore';
+import * as FileSystem from 'expo-file-system';
+import * as Network from 'expo-network';
 import { db } from '../config/firebaseConfig';
 import { COLLECTIONS } from '../constants/config';
 import {
@@ -26,12 +28,10 @@ import {
   deleteStorageFile,
   type AdditionalJobPayload,
 } from '../services';
+import { addToQueue } from '../utils/imageQueue';
 import type { Job, JobFile, JobMedia } from '../types/job';
 
 // ─── Query Keys ───────────────────────────────────────────────────────────────
-// Centralised here so mutations and queries always use an identical key shape.
-// Invalidating ['jobs'] cascades to every sub-key below it automatically.
-
 export const jobKeys = {
   all: ['jobs'] as const,
   byCompany: (companyId: string) => ['jobs', 'all', companyId] as const,
@@ -40,17 +40,40 @@ export const jobKeys = {
 };
 
 // ─── Query Hooks ──────────────────────────────────────────────────────────────
-
-/** Fetches a single job by ID. Query is skipped if `id` is falsy. */
 export function useGetJob(id: string) {
+  const queryClient = useQueryClient();
   return useQuery<Job, Error>({
     queryKey: jobKeys.detail(id),
     queryFn: () => getJob(id),
     enabled: !!id,
+    // Seed from the already-cached company list so the detail screen renders
+    // immediately without a spinner — and dependent queries (useGetCustomer,
+    // useCustomerJobsListener) can fire in parallel on the very first frame
+    // instead of waiting for this query to settle first.
+    initialData: (): Job | undefined => {
+      if (!id) return undefined;
+      const caches = queryClient.getQueriesData<Job[]>({ queryKey: ['jobs', 'all'] });
+      for (const [, data] of caches) {
+        if (!Array.isArray(data)) continue;
+        const found = data.find((j) => j.id === id);
+        if (found) return found;
+      }
+      return undefined;
+    },
+    // Propagate the source cache's age so React Query respects the global
+    // staleTime and only triggers a background refetch when actually needed.
+    initialDataUpdatedAt: () => {
+      const caches = queryClient.getQueriesData<Job[]>({ queryKey: ['jobs', 'all'] });
+      let newest = 0;
+      for (const [key] of caches) {
+        const t = queryClient.getQueryState(key)?.dataUpdatedAt ?? 0;
+        if (t > newest) newest = t;
+      }
+      return newest;
+    },
   });
 }
 
-/** Fetches all active jobs linked to a specific customer. */
 export function useGetJobsByCustomerId(customerId: string) {
   return useQuery<Job[], Error>({
     queryKey: jobKeys.byCustomer(customerId),
@@ -59,7 +82,6 @@ export function useGetJobsByCustomerId(customerId: string) {
   });
 }
 
-/** Fetches all active jobs for a company. Used by the pipeline / dashboard. */
 export function useGetAllJobs(companyId: string) {
   return useQuery<Job[], Error>({
     queryKey: jobKeys.byCompany(companyId),
@@ -69,13 +91,6 @@ export function useGetAllJobs(companyId: string) {
 }
 
 // ─── Real-time Listener ───────────────────────────────────────────────────────
-
-/**
- * Subscribes to all jobs for a given customer using Firestore's onSnapshot.
- * Updates in real time whenever any job in the customer's portfolio changes.
- * Returns an empty array while `customerId` or `companyId` is falsy or while loading.
- * The companyId filter is required for Firestore security rules to be satisfied.
- */
 export function useCustomerJobsListener(customerId: string, companyId: string) {
   const [jobs, setJobs] = useState<any[]>([]);
 
@@ -100,22 +115,21 @@ export function useCustomerJobsListener(customerId: string, companyId: string) {
 }
 
 // ─── Mutation Hooks ───────────────────────────────────────────────────────────
+type CreateJobVars = Omit<Job, 'id'> & { presetId?: string; actor?: { id: string; name: string } };
 
-/** Creates a new job. Invalidates all job queries on success. */
 export function useCreateJob() {
   const queryClient = useQueryClient();
-  return useMutation<Job, Error, Omit<Job, 'id'>>({
-    mutationFn: (data) => createJob(data),
+  return useMutation<Job, Error, CreateJobVars>({
+    mutationFn: (vars: CreateJobVars) => {
+      const { presetId, actor, ...data } = vars;
+      return createJob(data as Omit<Job, 'id'>, actor, presetId);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: jobKeys.all });
     },
   });
 }
 
-/**
- * Creates a minimal linked job for an existing customer (status: Lead, financials: 0).
- * Invalidates all job queries on success and returns the new job's Firestore ID.
- */
 export function useCreateAdditionalJob() {
   const queryClient = useQueryClient();
   return useMutation<string, Error, AdditionalJobPayload>({
@@ -133,11 +147,6 @@ type UpdateJobVars = {
   audit?: { actor: { id: string; name: string; companyId: string }; action: string };
 };
 
-/** Partially updates an existing job. Invalidates all job queries on success.
- *  Also invalidates the customer detail query when a historyEntry is present,
- *  because the service layer writes the entry to the customer's jobHistory field —
- *  without this, the Job History card on the customer profile would show stale data.
- */
 export function useUpdateJob() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, UpdateJobVars>({
@@ -145,8 +154,6 @@ export function useUpdateJob() {
     onSuccess: (_result, { id, historyEntry }) => {
       queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
       queryClient.invalidateQueries({ queryKey: jobKeys.all });
-      // If a history entry was written to the customer doc, invalidate that
-      // customer's cached data so the Job History card reflects the change.
       if (historyEntry?.customerId) {
         queryClient.invalidateQueries({ queryKey: ['customers', historyEntry.customerId] });
       }
@@ -154,7 +161,6 @@ export function useUpdateJob() {
   });
 }
 
-/** Soft-deletes a job. Invalidates all job queries on success. */
 export function useDeleteJob() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, string>({
@@ -174,22 +180,63 @@ type UploadJobMediaVars = {
 };
 
 /**
- * Uploads one or more images to Firebase Storage and appends the resulting
- * JobMedia entries to the job's photo array using arrayUnion.
- * Invalidates jobKeys.detail(jobId) on success.
+ * Uploads one or more images to Firebase Storage, then appends the resulting
+ * JobMedia entries to the job document via arrayUnion.
  */
 export function useUploadJobMedia() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, UploadJobMediaVars>({
     mutationFn: async ({ jobId, photoType, uris }) => {
-      const mediaItems = await Promise.all(
-        uris.map((uri, i) => uploadJobPhoto(jobId, photoType, uri, String(i))),
+      console.log(`\n📸 [UPLOAD HOOK] Triggered for Job: ${jobId} | Photos to process: ${uris.length}`);
+
+      const state = await Network.getNetworkStateAsync();
+      console.log(`📶 [UPLOAD HOOK] Network check: ${state.isConnected ? "ONLINE" : "OFFLINE"}`);
+
+      // ── Offline path: queue everything and return immediately ─────────────
+      if (!state.isConnected) {
+        console.log(`📴 [UPLOAD HOOK] Device is offline. Adding ${uris.length} photos to local queue...`);
+        try {
+          await Promise.all(uris.map((uri) => addToQueue({ jobId, photoType, uri })));
+          console.log(`✅ [UPLOAD HOOK] Successfully saved photos to offline queue.`);
+        } catch (queueError) {
+          console.error(`❌ [UPLOAD HOOK] CRASH inside addToQueue:`, queueError);
+        }
+        return;
+      }
+
+      // ── Online path: upload each URI independently ────────────────────────
+      console.log(`🌐 [UPLOAD HOOK] Device is online. Attempting live upload...`);
+      await Promise.all(
+        uris.map(async (uri, i) => {
+          try {
+            console.log(`⏳ [UPLOAD HOOK] Uploading photo ${i + 1} of ${uris.length}...`);
+            const uniqueId = String(Date.now() + i); 
+            const media = await uploadJobPhoto(jobId, photoType, uri, uniqueId);
+            
+            console.log(`📝 [UPLOAD HOOK] Photo ${i + 1} uploaded to Storage. Appending to Firestore...`);
+            await appendJobMedia(jobId, photoType, media);
+            
+            console.log(`🧹 [UPLOAD HOOK] Firestore updated. Deleting local cache for photo ${i + 1}...`);
+            FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+          } catch (error: any) {
+            console.warn(`⚠️ [UPLOAD HOOK] Live upload failed for photo ${i + 1}. Moving to offline queue. Error:`, error.message || error);
+            try {
+              await addToQueue({ jobId, photoType, uri });
+              console.log(`✅ [UPLOAD HOOK] Successfully moved failed photo ${i + 1} to queue.`);
+            } catch (fallbackQueueError) {
+              console.error(`❌ [UPLOAD HOOK] Fallback queue failed:`, fallbackQueueError);
+            }
+          }
+        }),
       );
-      await appendJobMedia(jobId, photoType, mediaItems);
     },
     onSuccess: (_result, { jobId }) => {
+      console.log(`🔄 [UPLOAD HOOK] Mutation finished. Refreshing UI for Job: ${jobId}\n`);
       queryClient.invalidateQueries({ queryKey: jobKeys.detail(jobId) });
     },
+    onError: (error) => {
+      console.error(`💥 [UPLOAD HOOK] ENTIRE MUTATION CRASHED:`, error);
+    }
   });
 }
 
@@ -199,11 +246,6 @@ type DeleteJobMediaVars = {
   updatedList: JobMedia[];
 };
 
-/**
- * Replaces the job's photo array with the provided list (minus the deleted item),
- * then best-effort deletes the file from Firebase Storage.
- * Invalidates jobKeys.detail(jobId) on success.
- */
 export function useDeleteJobMedia() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, DeleteJobMediaVars>({
@@ -225,11 +267,6 @@ type AddJobDocumentVars = {
   fileName: string;
 };
 
-/**
- * Uploads a document to Firebase Storage, constructs a JobFile record,
- * and appends it to the job's files array using arrayUnion.
- * Invalidates jobKeys.detail(jobId) on success.
- */
 export function useAddJobDocument() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, AddJobDocumentVars>({
@@ -257,11 +294,6 @@ type DeleteJobDocumentVars = {
   updatedFiles: any[];
 };
 
-/**
- * Replaces the job's files array with the provided list (minus the deleted file),
- * then best-effort deletes the file from Firebase Storage.
- * Invalidates jobKeys.detail(jobId) on success.
- */
 export function useDeleteJobDocument() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, DeleteJobDocumentVars>({

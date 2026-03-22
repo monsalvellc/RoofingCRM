@@ -23,9 +23,15 @@ export interface CompanyUser {
 /**
  * Fetches all users belonging to a company.
  * Returns a list of { id, name } objects suitable for assignment UI.
- * @throws If the Firestore query fails.
+ *
+ * Returns [] (never throws) when:
+ *   - companyId is falsy — caller hasn't loaded auth yet.
+ *   - Firestore rejects with a permission error — graceful degradation so
+ *     the UI shows "Unknown" chips rather than crashing.
  */
 export async function getCompanyUsers(companyId: string): Promise<CompanyUser[]> {
+  if (!companyId) return [];
+
   try {
     const q = query(
       collection(db, COLLECTIONS.users),
@@ -37,8 +43,8 @@ export async function getCompanyUsers(companyId: string): Promise<CompanyUser[]>
       name: `${d.data().firstName || ''} ${d.data().lastName || ''}`.trim(),
     }));
   } catch (error) {
-    console.error('[usersService] getCompanyUsers failed:', error);
-    throw new Error('Failed to fetch company users. Please try again.');
+    console.warn('[usersService] getCompanyUsers failed:', error);
+    return [];
   }
 }
 

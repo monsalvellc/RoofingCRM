@@ -4,73 +4,99 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocFromCache,
   getDocs,
-  addDoc,
+  getDocsFromCache,
+  setDoc,
   updateDoc,
   query,
   where,
   type UpdateData,
   type DocumentData,
 } from 'firebase/firestore';
+import * as Network from 'expo-network';
 import { db } from '../../config/firebaseConfig';
 import { COLLECTIONS } from '../../constants/config';
 import type { Customer } from '../../types/customer';
 import { createAuditLog } from './auditService';
+import { saveLocalEntity, getLocalEntity } from '../../utils/localVault';
 
-// Actor shape passed by callers who have auth context available.
-// All actor params are optional — audit logging silently skips if omitted.
 type AuditActor = { id: string; name: string; companyId: string };
 
 // ─── Token Generator ──────────────────────────────────────────────────────────
 
-const PORTAL_TOKEN_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const PORTAL_TOKEN_CHARSET =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const generatePortalToken = (): string =>
   Array.from({ length: 15 }, () =>
     PORTAL_TOKEN_CHARSET[Math.floor(Math.random() * PORTAL_TOKEN_CHARSET.length)],
   ).join('');
 
-// ─── Internal Helper ──────────────────────────────────────────────────────────
+// ─── Internal Helpers ─────────────────────────────────────────────────────────
 
-/**
- * Maps a raw Firestore document snapshot to a strictly-typed Customer.
- * The document ID is injected as `id` since Firestore stores it separately.
- */
 const toCustomer = (snap: { id: string; data: () => DocumentData }): Customer =>
   ({ id: snap.id, ...snap.data() } as Customer);
 
-// ─── Read ─────────────────────────────────────────────────────────────────────
+async function isOffline(): Promise<boolean> {
+  const state = await Network.getNetworkStateAsync();
+  return state.isConnected === false || state.isInternetReachable === false;
+}
+
+// ─── Read (cache-first) ───────────────────────────────────────────────────────
 
 /**
- * Fetches a single customer by document ID.
- * @throws If the document does not exist or the Firestore call fails.
+ * Fetches a single customer by ID.
+ * Tries the Firestore in-memory cache first — instant response when offline.
  */
 export async function getCustomer(id: string): Promise<Customer> {
+  const ref = doc(db, COLLECTIONS.customers, id);
+
+  // 1. Firestore in-memory cache — instant when offline.
+  try {
+    const cached = await getDocFromCache(ref);
+    if (cached.exists()) return toCustomer(cached);
+  } catch (_) {
+    // Not cached — fall through to network.
+  }
+
+  // 2. Network fetch.
   let snap;
   try {
-    snap = await getDoc(doc(db, COLLECTIONS.customers, id));
+    snap = await getDoc(ref);
   } catch (error) {
-    console.error('[customersService] getCustomer failed:', error);
-    throw new Error(`Failed to fetch customer "${id}". Please try again.`);
+    // Network error — fall through to vault.
+    console.warn('[customersService] getCustomer network fetch failed, checking vault:', error);
   }
 
-  if (!snap.exists()) {
-    throw new Error(`Customer with ID "${id}" was not found.`);
-  }
+  if (snap?.exists()) return toCustomer(snap);
 
-  return toCustomer(snap);
+  // 3. Local vault — covers offline-created customers not yet synced.
+  const vaultCustomer = await getLocalEntity<Customer>(COLLECTIONS.customers, id);
+  if (vaultCustomer) return vaultCustomer;
+
+  // 4. Truly not found anywhere.
+  console.error(`[customersService] getCustomer: "${id}" not in Firestore or vault`);
+  throw new Error(`Customer with ID "${id}" was not found.`);
 }
 
 /**
- * Fetches all active (non-deleted) customers belonging to a company.
- * @throws If the Firestore query fails.
+ * Fetches all active customers for a company. Cache-first.
  */
 export async function getAllCustomers(companyId: string): Promise<Customer[]> {
+  const q = query(
+    collection(db, COLLECTIONS.customers),
+    where('companyId', '==', companyId),
+    where('isDeleted', '==', false),
+  );
+
   try {
-    const q = query(
-      collection(db, COLLECTIONS.customers),
-      where('companyId', '==', companyId),
-      where('isDeleted', '==', false),
-    );
+    const cached = await getDocsFromCache(q);
+    if (!cached.empty) return cached.docs.map(toCustomer);
+  } catch (_) {
+    // Cache miss — fall through.
+  }
+
+  try {
     const snap = await getDocs(q);
     return snap.docs.map(toCustomer);
   } catch (error) {
@@ -82,112 +108,94 @@ export async function getAllCustomers(companyId: string): Promise<Customer[]> {
 // ─── Create ───────────────────────────────────────────────────────────────────
 
 /**
- * Creates a new customer document. Firestore auto-generates the document ID.
- * Automatically stamps timestamps, sets isDeleted, assigns the creator, and
- * writes an initial assignment history entry.
- * @param data    Core customer fields (createdAt/updatedAt/isDeleted are overwritten internally).
- * @param creator The logged-in user creating the record, or null if unavailable.
- * @throws If the Firestore write fails.
+ * Creates a new customer document.
+ *
+ * - When `id` is provided (offline-first flow from add-lead.tsx), uses `setDoc`
+ *   with a fire-and-forget write so the function returns the Customer object
+ *   immediately without waiting for server acknowledgement.
+ * - When offline, injects `isOfflineLead: true` into the payload as a flag for
+ *   downstream processing (e.g. the geocoding Cloud Function, follow-up sync).
+ * - When `id` is omitted, falls back to `addDoc` (awaited) for the online path.
+ *
+ * @param data    Core customer fields.
+ * @param creator The logged-in user, or null.
+ * @param id      Optional pre-generated Firestore document ID (offline-first).
  */
-// export async function createCustomer(
-//   data: Omit<Customer, 'id'>,
-//   creator?: { id: string; name: string } | null,
-// ): Promise<Customer> {
-//   try {
-//     const now = new Date().toISOString();
-//     const dateLabel = new Date().toLocaleDateString('en-US', {
-//       month: 'short',
-//       day: 'numeric',
-//       year: 'numeric',
-//     });
-
-//     const historyEntry = creator
-//       ? `Customer created - ${creator.name} on ${dateLabel}`
-//       : `Customer created on ${dateLabel}`;
-
-//     const assignedUserIds = [...(data.assignedUserIds ?? [])];
-//     if (creator?.id && !assignedUserIds.includes(creator.id)) {
-//       assignedUserIds.push(creator.id);
-//     }
-
-//     const payload: Omit<Customer, 'id'> = {
-//       ...data,
-//       assignedUserIds,
-//       assignmentHistory: [historyEntry],
-//       isDeleted: false,
-//       createdAt: now,
-//       updatedAt: now,
-//     };
-
-//     const ref = await addDoc(collection(db, COLLECTIONS.customers), payload);
-//     return { id: ref.id, ...payload };
-//   } catch (error) {
-//     console.error('[customersService] createCustomer failed:', error);
-//     throw new Error('Failed to create customer. Please try again.');
-//   }
-// }
-
 export async function createCustomer(
-  data: Omit<Customer, 'id'>, 
-  creator?: { id: string; name: string } | null
+  data: Omit<Customer, 'id'>,
+  creator?: { id: string; name: string } | null,
+  id?: string,
 ): Promise<Customer> {
-  try {
-    const now = new Date().toISOString();
-    
-    // 1. Generate the History Log
-    const dateStr = new Date().toLocaleDateString();
-    const historyEntry = creator 
-      ? `Customer created - ${creator.name} on ${dateStr}`
-      : `Customer created on ${dateStr}`;
+  const now = new Date().toISOString();
 
-    // 2. Ensure the Creator is Assigned (if not already)
-    let finalAssignments = data.assignedUserIds || [];
-    if (creator && !finalAssignments.includes(creator.id)) {
-      finalAssignments = [...finalAssignments, creator.id];
-    }
+  // 1. Generate ID locally — zero network activity.
+  const newId = id ?? doc(collection(db, COLLECTIONS.customers)).id;
 
-    // 3. Build the Robust Payload
-    const payload = {
-      ...data,
-      assignedUserIds: finalAssignments,
-      assignmentHistory: [historyEntry], // <--- Starts the log!
-      portalToken: generatePortalToken(),
-      jobIds: [],
-      isDeleted: false,
-      createdAt: now,
-      updatedAt: now,
-    };
+  const dateStr = new Date().toLocaleDateString();
+  const historyEntry = creator
+    ? `Customer created - ${creator.name} on ${dateStr}`
+    : `Customer created on ${dateStr}`;
 
-    const ref = await addDoc(collection(db, COLLECTIONS.customers), payload);
-    if (creator) {
-      await createAuditLog({
-        companyId: data.companyId,
-        entityId: ref.id,
-        entityType: 'CUSTOMER',
-        userId: creator.id,
-        userName: creator.name,
-        action: 'CUSTOMER_CREATED',
-        message: `${creator.name} created customer ${data.firstName} ${data.lastName}`,
-      });
-    }
-    return { id: ref.id, ...payload };
-  } catch (error) {
-    console.error('[customersService] createCustomer failed:', error);
-    throw new Error('Failed to create customer. Please try again.');
+  let finalAssignments = data.assignedUserIds || [];
+  if (creator && !finalAssignments.includes(creator.id)) {
+    finalAssignments = [...finalAssignments, creator.id];
   }
+
+  const payload: Record<string, unknown> = {
+    ...data,
+    assignedUserIds: finalAssignments,
+    assignmentHistory: [historyEntry],
+    portalToken: generatePortalToken(),
+    jobIds: [],
+    isDeleted: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  // 2. True fire-and-forget — no await. Firestore writes to local cache
+  //    synchronously; server sync is queued automatically.
+  setDoc(doc(db, COLLECTIONS.customers, newId), payload).catch((e) =>
+    console.warn('[customersService] createCustomer pending sync:', e),
+  );
+
+  // 3. Non-blocking offline handling — resolves after we've already returned.
+  //    If offline: persist to the JSON vault for cross-session durability and
+  //    tag the document with isOfflineLead so lists can show SyncBadge.
+  isOffline().then((offline) => {
+    if (offline) {
+      const offlinePayload = { ...(payload as Record<string, unknown>), id: newId, isOfflineLead: true };
+      // Vault write — survives app restarts.
+      saveLocalEntity(COLLECTIONS.customers, offlinePayload as Record<string, unknown> & { id: string });
+      // Tag the Firestore local-cache doc.
+      updateDoc(doc(db, COLLECTIONS.customers, newId), { isOfflineLead: true }).catch(() => {});
+    }
+  });
+
+  // 4. Non-blocking audit log.
+  if (creator) {
+    createAuditLog({
+      companyId: data.companyId,
+      entityId: newId,
+      entityType: 'CUSTOMER',
+      userId: creator.id,
+      userName: creator.name,
+      action: 'CUSTOMER_CREATED',
+      message: `${creator.name} created customer ${data.firstName} ${data.lastName}`,
+    });
+  }
+
+  // 5. Instant return — useMutation sees Success in ~1ms.
+  return { id: newId, ...(payload as Omit<Customer, 'id'>) };
 }
 
-// ─── Update ───────────────────────────────────────────────────────────────────
+// ─── Update (fire-and-forget) ─────────────────────────────────────────────────
 
 /**
- * Performs a partial update on an existing customer document.
- * Always stamps `updatedAt`. When `historyEntry` is supplied it is appended to
- * the customer's `jobHistory` array via arrayUnion (so the Job History card on
- * the customer profile reflects the change without a separate write). When
- * `actor` is supplied an audit_log document is written as well.
+ * Partially updates a customer document.
  *
- * Only the fields provided in `data` are modified; all others are untouched.
- * @throws If the Firestore write fails.
+ * Fire-and-forget: the Firestore write and audit log are dispatched without
+ * awaiting server acknowledgement. Local cache reflects the change immediately;
+ * server sync is queued automatically.
  */
 export async function updateCustomer(
   id: string,
@@ -195,110 +203,80 @@ export async function updateCustomer(
   actor?: AuditActor,
   historyEntry?: string,
 ): Promise<void> {
-  try {
-    // Build the Firestore payload. We cast to `any` here because arrayUnion
-    // returns a FieldValue which is not assignable to the typed Customer fields
-    // — Firestore accepts it at runtime and the cast keeps TypeScript happy.
-    // Build payload manually so any undefined optional fields become deleteField()
-    // instead of being passed as-is — Firestore rejects raw undefined values.
-    const payload: Record<string, any> = { updatedAt: new Date().toISOString() };
-    for (const [key, val] of Object.entries(data as Record<string, any>)) {
-      payload[key] = val === undefined ? deleteField() : val;
-    }
+  const payload: Record<string, any> = { updatedAt: new Date().toISOString() };
+  for (const [key, val] of Object.entries(data as Record<string, any>)) {
+    payload[key] = val === undefined ? deleteField() : val;
+  }
+  if (historyEntry) {
+    payload.jobHistory = arrayUnion(historyEntry);
+  }
 
-    // Append the history string to the jobHistory array on the customer doc.
-    // arrayUnion is idempotent — duplicates are ignored automatically.
-    if (historyEntry) {
-      payload.jobHistory = arrayUnion(historyEntry);
-    }
+  updateDoc(
+    doc(db, COLLECTIONS.customers, id),
+    payload as UpdateData<DocumentData>,
+  ).catch((e) => console.warn('[customersService] updateCustomer pending sync:', e));
 
-    await updateDoc(doc(db, COLLECTIONS.customers, id), payload as UpdateData<DocumentData>);
-
-    // Write a structured audit log entry if the caller provided actor context.
-    if (actor) {
-      await createAuditLog({
-        companyId: actor.companyId,
-        entityId: id,
-        entityType: 'CUSTOMER',
-        userId: actor.id,
-        userName: actor.name,
-        action: 'CUSTOMER_UPDATED',
-        message: historyEntry ?? `${actor.name} updated customer details`,
-      });
-    }
-  } catch (error) {
-    console.error('[customersService] updateCustomer failed:', error);
-    throw new Error(`Failed to update customer "${id}". Please try again.`);
+  if (actor) {
+    createAuditLog({
+      companyId: actor.companyId,
+      entityId: id,
+      entityType: 'CUSTOMER',
+      userId: actor.id,
+      userName: actor.name,
+      action: 'CUSTOMER_UPDATED',
+      message: historyEntry ?? `${actor.name} updated customer details`,
+    });
   }
 }
 
-// ─── Delete (Soft) ────────────────────────────────────────────────────────────
+// ─── Delete (Soft, fire-and-forget) ──────────────────────────────────────────
 
-/**
- * Soft-deletes a customer by setting `isDeleted: true` and stamping `updatedAt`.
- * The document is retained in Firestore for audit/recovery purposes.
- * @throws If the Firestore write fails.
- */
 export async function deleteCustomer(id: string, actor?: AuditActor): Promise<void> {
-  try {
-    await updateDoc(doc(db, COLLECTIONS.customers, id), {
-      isDeleted: true,
-      updatedAt: new Date().toISOString(),
+  updateDoc(doc(db, COLLECTIONS.customers, id), {
+    isDeleted: true,
+    updatedAt: new Date().toISOString(),
+  }).catch((e) => console.warn('[customersService] deleteCustomer pending sync:', e));
+
+  if (actor) {
+    createAuditLog({
+      companyId: actor.companyId,
+      entityId: id,
+      entityType: 'CUSTOMER',
+      userId: actor.id,
+      userName: actor.name,
+      action: 'CUSTOMER_DELETED',
+      message: `${actor.name} deleted customer`,
     });
-    if (actor) {
-      await createAuditLog({
-        companyId: actor.companyId,
-        entityId: id,
-        entityType: 'CUSTOMER',
-        userId: actor.id,
-        userName: actor.name,
-        action: 'CUSTOMER_DELETED',
-        message: `${actor.name} deleted customer`,
-      });
-    }
-  } catch (error) {
-    console.error('[customersService] deleteCustomer failed:', error);
-    throw new Error(`Failed to delete customer "${id}". Please try again.`);
   }
 }
 
-// ─── Deactivate (Hide) ────────────────────────────────────────────────────────
+// ─── Deactivate (Hide, fire-and-forget) ───────────────────────────────────────
 
-/**
- * Hides a customer (and all their associated jobs) from the pipeline by setting
- * `isHidden: true`. The records are NOT deleted — they remain in Firestore and
- * can be restored by setting `isHidden: false` directly in the console.
- * @throws If the Firestore write fails.
- */
 export async function deactivateCustomer(id: string, actor?: AuditActor): Promise<void> {
-  try {
-    await updateDoc(doc(db, COLLECTIONS.customers, id), {
-      isHidden: true,
-      updatedAt: new Date().toISOString(),
+  updateDoc(doc(db, COLLECTIONS.customers, id), {
+    isHidden: true,
+    updatedAt: new Date().toISOString(),
+  }).catch((e) => console.warn('[customersService] deactivateCustomer pending sync:', e));
+
+  if (actor) {
+    createAuditLog({
+      companyId: actor.companyId,
+      entityId: id,
+      entityType: 'CUSTOMER',
+      userId: actor.id,
+      userName: actor.name,
+      action: 'CUSTOMER_DEACTIVATED',
+      message: `${actor.name} deactivated customer`,
     });
-    if (actor) {
-      await createAuditLog({
-        companyId: actor.companyId,
-        entityId: id,
-        entityType: 'CUSTOMER',
-        userId: actor.id,
-        userName: actor.name,
-        action: 'CUSTOMER_DEACTIVATED',
-        message: `${actor.name} deactivated customer`,
-      });
-    }
-  } catch (error) {
-    console.error('[customersService] deactivateCustomer failed:', error);
-    throw new Error(`Failed to deactivate customer "${id}". Please try again.`);
   }
 }
 
 // ─── Assignment ────────────────────────────────────────────────────────────────
 
 /**
- * Updates the customer's assigned reps and appends a history entry, then syncs
- * the same `assignedUserIds` array onto every associated job document.
- * @throws If the customer update or job sync fails.
+ * Updates assigned reps on a customer and fans out the same list to all
+ * associated jobs. The initial customer write is fire-and-forget; the job
+ * fan-out reads from cache first to minimise network usage.
  */
 export async function assignCustomerReps(
   customerId: string,
@@ -306,30 +284,48 @@ export async function assignCustomerReps(
   historyEntry: string,
   actor?: AuditActor,
 ): Promise<void> {
+  // Customer write — fire-and-forget.
+  updateDoc(doc(db, COLLECTIONS.customers, customerId), {
+    assignedUserIds: selectedUserIds,
+    assignmentHistory: arrayUnion(historyEntry),
+  }).catch((e) =>
+    console.warn('[customersService] assignCustomerReps customer pending sync:', e),
+  );
+
+  // Read associated jobs (cache-first), then fan-out — fire-and-forget.
+  const jobsQuery = query(
+    collection(db, COLLECTIONS.jobs),
+    where('customerId', '==', customerId),
+  );
+
+  let jobDocs;
   try {
-    await updateDoc(doc(db, COLLECTIONS.customers, customerId), {
-      assignedUserIds: selectedUserIds,
-      assignmentHistory: arrayUnion(historyEntry),
-    });
-    const jobsSnap = await getDocs(
-      query(collection(db, COLLECTIONS.jobs), where('customerId', '==', customerId)),
-    );
-    await Promise.all(
-      jobsSnap.docs.map((d) => updateDoc(d.ref, { assignedUserIds: selectedUserIds })),
-    );
-    if (actor) {
-      await createAuditLog({
-        companyId: actor.companyId,
-        entityId: customerId,
-        entityType: 'CUSTOMER',
-        userId: actor.id,
-        userName: actor.name,
-        action: 'CUSTOMER_ASSIGNED',
-        message: historyEntry,
-      });
+    const cached = await getDocsFromCache(jobsQuery);
+    jobDocs = cached.empty ? (await getDocs(jobsQuery)).docs : cached.docs;
+  } catch (_) {
+    try {
+      jobDocs = (await getDocs(jobsQuery)).docs;
+    } catch (error) {
+      console.error('[customersService] assignCustomerReps job query failed:', error);
+      throw new Error('Failed to save assignments. Please try again.');
     }
-  } catch (error) {
-    console.error('[customersService] assignCustomerReps failed:', error);
-    throw new Error('Failed to save assignments. Please try again.');
+  }
+
+  jobDocs.forEach((d) => {
+    updateDoc(d.ref, { assignedUserIds: selectedUserIds }).catch((e) =>
+      console.warn('[customersService] assignCustomerReps job pending sync:', e),
+    );
+  });
+
+  if (actor) {
+    createAuditLog({
+      companyId: actor.companyId,
+      entityId: customerId,
+      entityType: 'CUSTOMER',
+      userId: actor.id,
+      userName: actor.name,
+      action: 'CUSTOMER_ASSIGNED',
+      message: historyEntry,
+    });
   }
 }

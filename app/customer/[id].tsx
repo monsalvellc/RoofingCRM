@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  InteractionManager,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -82,9 +83,17 @@ export default function CustomerProfileScreen() {
     notes: '',
   });
 
+  // Defers rendering the full profile content until the navigation transition
+  // has settled. The Stack.Screen header still shows the title immediately.
+  const [isReady, setIsReady] = useState(false);
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => setIsReady(true));
+    return () => task.cancel();
+  }, []);
+
   // ─── Loading & Error States ──────────────────────────────────────────────────
 
-  if (isLoading) {
+  if (isLoading && !customer) {
     return (
       <View style={styles.centered}>
         <Stack.Screen options={{ title: 'Customer Profile', headerBackTitle: 'Back' }} />
@@ -248,6 +257,15 @@ export default function CustomerProfileScreen() {
 
   // ─── Render ──────────────────────────────────────────────────────────────────
 
+  if (!isReady) {
+    return (
+      <View style={styles.centered}>
+        <Stack.Screen options={{ title: 'Customer Profile', headerBackTitle: 'Back' }} />
+        <ActivityIndicator size="large" color={COLORS.primary} />
+      </View>
+    );
+  }
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
       <Stack.Screen options={{ title: 'Customer Profile', headerBackTitle: 'Back' }} />
@@ -283,7 +301,7 @@ export default function CustomerProfileScreen() {
               const found = companyUsers.find((u) => u.id === uid);
               return (
                 <View key={uid} style={styles.chip}>
-                  <Typography style={styles.chipText}>{found?.name ?? uid}</Typography>
+                  <Typography style={styles.chipText}>{found?.name ?? 'Unknown'}</Typography>
                 </View>
               );
             })}

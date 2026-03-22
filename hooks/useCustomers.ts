@@ -24,10 +24,33 @@ export const customerKeys = {
 
 /** Fetches a single customer by ID. Query is skipped if `id` is falsy. */
 export function useGetCustomer(id: string) {
+  const queryClient = useQueryClient();
   return useQuery<Customer, Error>({
     queryKey: customerKeys.detail(id),
     queryFn: () => getCustomer(id),
     enabled: !!id,
+    // Seed from the already-cached company list so the customer profile screen
+    // renders immediately and dependent UI (assigned-rep chips, edit form) is
+    // available on the first frame without a loading spinner.
+    initialData: (): Customer | undefined => {
+      if (!id) return undefined;
+      const caches = queryClient.getQueriesData<Customer[]>({ queryKey: ['customers', 'all'] });
+      for (const [, data] of caches) {
+        if (!Array.isArray(data)) continue;
+        const found = data.find((c) => c.id === id);
+        if (found) return found;
+      }
+      return undefined;
+    },
+    initialDataUpdatedAt: () => {
+      const caches = queryClient.getQueriesData<Customer[]>({ queryKey: ['customers', 'all'] });
+      let newest = 0;
+      for (const [key] of caches) {
+        const t = queryClient.getQueryState(key)?.dataUpdatedAt ?? 0;
+        if (t > newest) newest = t;
+      }
+      return newest;
+    },
   });
 }
 

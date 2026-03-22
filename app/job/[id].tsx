@@ -1,9 +1,10 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Dimensions,
   FlatList,
+  InteractionManager,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -33,6 +34,12 @@ import {
   useUploadQueue,
   jobKeys,
 } from '../../hooks';
+import { useOfflineMedia } from '../../hooks/useOfflineMedia';
+import { saveMediaToVault } from '../../utils/mediaVault';
+import { useSyncContext } from '../../context/SyncContext';
+const Network = require('expo-network') as {
+  getNetworkStateAsync: () => Promise<{ isConnected: boolean | null }>;
+};
 import { useGetCustomer, useUpdateCustomer } from '../../hooks';
 import { useHdPhotoQuality } from '../../hooks';
 import { useQueryClient } from '@tanstack/react-query';
@@ -129,7 +136,28 @@ export default function JobDetailScreen() {
   const inspectionQueue = useUploadQueue();
   const installQueue = useUploadQueue();
 
+  // Offline media — vault reads and per-screen gallery refresh.
+  const {
+    pendingInspectionPhotos,
+    pendingInstallPhotos,
+    pendingDocuments,
+    pendingCount,
+    refreshMedia,
+  } = useOfflineMedia(id);
+
+  // Global sync engine — badge ledger, in-flight state, upload trigger.
+  const { addPending, triggerSync, activeSyncs } = useSyncContext();
+  const isSyncing = activeSyncs[id] === true;
+
   const isUploading = isUploadingDoc;
+
+  // Defers rendering the full tab content until the navigation slide animation
+  // has settled, keeping the first committed frame lightweight.
+  const [isReady, setIsReady] = useState(false);
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => setIsReady(true));
+    return () => task.cancel();
+  }, []);
 
   // ─── Local UI State ───────────────────────────────────────────────────────
 
@@ -443,6 +471,15 @@ export default function JobDetailScreen() {
     const result = await DocumentPicker.getDocumentAsync({ type: '*/*' });
     if (result.canceled) return;
     const asset = result.assets[0];
+
+    const { isConnected } = await Network.getNetworkStateAsync();
+    if (!isConnected) {
+      await saveMediaToVault(id, 'documents', asset.uri, asset.name);
+      await addPending(id, 1);
+      await refreshMedia();
+      return;
+    }
+
     addDocumentMutate(
       { jobId: id, uri: asset.uri, fileName: asset.name },
       {
@@ -463,11 +500,23 @@ export default function JobDetailScreen() {
     const result = await ImagePicker.launchCameraAsync({ quality: imageQuality });
     if (result.canceled) return;
 
+    const { isConnected } = await Network.getNetworkStateAsync();
+    const sourceUri = result.assets[0].uri;
+
+    if (!isConnected) {
+      // ── Offline: persist to vault so the photo survives app restarts ─────
+      await saveMediaToVault(id, photoType, sourceUri);
+      await addPending(id, 1);
+      await refreshMedia();
+      return;
+    }
+
+    // ── Online: enqueue for immediate upload with progress UI ─────────────
     const queue = photoType === 'inspectionPhotos' ? inspectionQueue : installQueue;
     const taskId = Date.now().toString();
     queue.enqueue([{
       id: taskId,
-      sourceUri: result.assets[0].uri,
+      sourceUri,
       uploadFn: async (uri, onProgress) => {
         const media = await uploadJobPhoto(id, photoType, uri, taskId, onProgress);
         await appendJobMedia(id, photoType, media);
@@ -485,6 +534,22 @@ export default function JobDetailScreen() {
     });
     if (result.canceled) return;
 
+    const { isConnected } = await Network.getNetworkStateAsync();
+
+    if (!isConnected) {
+      // ── Offline: persist every selected photo to vault ────────────────────
+      // Sequential loop with a unique per-asset suffix prevents filename
+      // collisions when multiple photos share the same Date.now() millisecond.
+      const batchId = Date.now();
+      for (let i = 0; i < result.assets.length; i++) {
+        await saveMediaToVault(id, photoType, result.assets[i].uri, `${batchId}_${i}`);
+      }
+      await addPending(id, result.assets.length);
+      await refreshMedia();
+      return;
+    }
+
+    // ── Online: enqueue for immediate upload with progress UI ─────────────
     const queue = photoType === 'inspectionPhotos' ? inspectionQueue : installQueue;
     const timestamp = Date.now();
     queue.enqueue(
@@ -660,7 +725,7 @@ export default function JobDetailScreen() {
 
   // ─── Loading & Error States ───────────────────────────────────────────────
 
-  if (isJobLoading) {
+  if (isJobLoading && !job) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={COLORS.primary} />
@@ -699,9 +764,22 @@ export default function JobDetailScreen() {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
+  // First-frame skeleton: show the correct navigation title immediately while
+  // the heavy ScrollView content waits for the transition to complete.
+  if (!isReady) {
+    return (
+      <>
+        <Stack.Screen options={{ title: customerName || job.jobName || job.jobId, headerBackTitle: 'Back' }} />
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+        </View>
+      </>
+    );
+  }
+
   return (
     <>
-      <Stack.Screen options={{ title: customerName || job.jobName || job.jobId }} />
+      <Stack.Screen options={{ title: customerName || job.jobName || job.jobId, headerBackTitle: 'Back' }} />
       <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
 
         {/* ── Unhide Banner ── */}
@@ -1040,6 +1118,24 @@ export default function JobDetailScreen() {
         {/* ── Media Tab ── */}
         {activeJobTab === 'media' && (
           <>
+            {/* Vault sync banner — shown when photos were saved offline */}
+            {pendingCount > 0 && (
+              <Pressable
+                style={[styles.syncBanner, isSyncing && { opacity: 0.7 }]}
+                onPress={() => triggerSync(id, refreshMedia)}
+                disabled={isSyncing}
+              >
+                <Ionicons name="cloud-upload-outline" size={18} color={COLORS.white} />
+                <Typography style={styles.syncBannerText}>
+                  {isSyncing
+                    ? 'Syncing…'
+                    : `Sync ${pendingCount} Offline Item${pendingCount === 1 ? '' : 's'} to Cloud`}
+                </Typography>
+                {!isSyncing && (
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.white} />
+                )}
+              </Pressable>
+            )}
             {FILE_SECTIONS.map(({ type: sectionType, label }) => {
               const isDoc = sectionType === 'document';
               const photoField =
@@ -1061,7 +1157,13 @@ export default function JobDetailScreen() {
                   ? inspectionQueue
                   : installQueue;
               const queueItems = photoQueue?.items ?? [];
-              const hasPhotoContent = photos.length > 0 || queueItems.length > 0;
+              const pendingVaultPhotos = isDoc
+                ? []
+                : sectionType === 'inspection'
+                  ? pendingInspectionPhotos
+                  : pendingInstallPhotos;
+              const hasPhotoContent =
+                photos.length > 0 || queueItems.length > 0 || pendingVaultPhotos.length > 0;
 
               return (
                 <View
@@ -1107,6 +1209,24 @@ export default function JobDetailScreen() {
                         onPress={handleAddDocument}
                         isLoading={isUploading}
                       />
+                      {/* Vault documents — saved offline, pending upload */}
+                      {pendingDocuments.length > 0 && (
+                        <View style={styles.photoGrid}>
+                          {pendingDocuments.map((vf) => (
+                            <View key={vf.uri} style={styles.photoThumbWrapper}>
+                              <View style={[styles.docCard, { opacity: 0.6 }]}>
+                                <Typography style={styles.docCardIcon}>📄</Typography>
+                                <Typography style={styles.docCardName} numberOfLines={3}>
+                                  {vf.name}
+                                </Typography>
+                                <View style={styles.docSharedBadge}>
+                                  <Typography style={styles.sharedBadgeText}>Offline</Typography>
+                                </View>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      )}
                       {docFiles.length > 0 ? (
                         <View style={styles.photoGrid}>
                           {docFiles.map((f) => (
@@ -1183,7 +1303,22 @@ export default function JobDetailScreen() {
                               marginTop: SPACING.sm,
                             }}
                           >
-                            {/* Confirmed photos from Firestore */}
+                            {/* ── Local vault photos — always shown first, online or offline ── */}
+                            {pendingVaultPhotos.map((uri: string) => (
+                              <View key={uri} style={styles.queueThumbWrapper}>
+                                <Image
+                                  source={{ uri }}
+                                  style={styles.photoHThumb}
+                                  contentFit="cover"
+                                />
+                                <View style={styles.offlinePendingStrip}>
+                                  <Typography style={styles.offlinePendingLabel}>
+                                    OFFLINE
+                                  </Typography>
+                                </View>
+                              </View>
+                            ))}
+                            {/* ── Confirmed photos from Firestore ── */}
                             {photos.map((photo, i) => (
                               <Pressable
                                 key={photo.id}
@@ -3284,5 +3419,46 @@ const styles = StyleSheet.create({
     padding: SPACING.xl,
     width: '100%',
     gap: SPACING.xs,
+  },
+  syncBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.warning,
+    marginHorizontal: SPACING.base,
+    marginTop: SPACING.base,
+    marginBottom: SPACING.xs,
+    borderRadius: RADIUS.md,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    gap: SPACING.sm,
+  },
+  syncBannerText: {
+    flex: 1,
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.white,
+  },
+  vaultLabel: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.white,
+  },
+
+  // Offline pending watermark — bottom strip on local vault photos
+  offlinePendingStrip: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(245, 124, 0, 0.82)',
+    paddingVertical: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  offlinePendingLabel: {
+    fontSize: 9,
+    fontWeight: FONT_WEIGHT.heavy,
+    color: COLORS.white,
+    letterSpacing: 0.8,
   },
 });

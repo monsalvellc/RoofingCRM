@@ -13,7 +13,13 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { uploadLeadFile } from '../services';
 import { useUploadQueue } from '../hooks/useUploadQueue';
+import { useQueryClient } from '@tanstack/react-query';
+import { saveImageToVault } from '../utils/imageVault';
+import { invalidateOfflineMedia } from '../hooks/useOfflineMedia';
 import type { JobMedia, LeadFile } from '../types';
+const Network = require('expo-network') as {
+  getNetworkStateAsync: () => Promise<{ isConnected: boolean | null }>;
+};
 import { Button, Typography } from './ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../constants/theme';
 
@@ -39,7 +45,10 @@ const PHOTO_CATEGORY_MAP: Partial<Record<Category, JobMedia['category']>> = {
 function toJobMedia(currentFiles: LeadFile[]): JobMedia[] {
   return currentFiles
     .filter(
-      (f) => f.type === 'image' && PHOTO_CATEGORY_MAP[f.category as Category] !== undefined,
+      (f) =>
+        f.type === 'image' &&
+        PHOTO_CATEGORY_MAP[f.category as Category] !== undefined &&
+        !f.url.startsWith('file://'), // local vault paths — already in vault, not Firestore
     )
     .map((f) => ({
       id: f.id,
@@ -54,12 +63,14 @@ function toJobMedia(currentFiles: LeadFile[]): JobMedia[] {
 
 interface Props {
   companyId: string;
+  jobId?: string;
   onUpdate: (media: JobMedia[], permissions: Record<string, boolean>) => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function LeadImagePicker({ companyId, onUpdate }: Props) {
+export default function LeadImagePicker({ companyId, jobId, onUpdate }: Props) {
+  const queryClient = useQueryClient();
   const [files, setFiles] = useState<LeadFile[]>([]);
   const [folderPermissions, setFolderPermissions] = useState<Record<string, boolean>>(
     () => Object.fromEntries(CATEGORIES.map((c) => [c, false])),
@@ -170,6 +181,30 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
     const asset = result.assets[0];
     const timestamp = Date.now();
     const taskId = `${timestamp}_cam`;
+
+    const { isConnected } = await Network.getNetworkStateAsync();
+    const photoType = category === 'Inspection' ? 'inspectionPhotos' : 'installPhotos';
+    if (!isConnected && jobId && category !== 'Documents') {
+      await saveImageToVault(jobId, photoType, asset.uri);
+      invalidateOfflineMedia(queryClient, jobId);
+      // Also add to local files list so the folder count updates and the
+      // photo appears in the strip immediately (with its local URI).
+      setFiles((prev) => [
+        ...prev,
+        {
+          id: taskId,
+          url: asset.uri,
+          name: asset.fileName ?? `photo_${timestamp}.jpg`,
+          type: 'image' as const,
+          category,
+          isPublic: folderPermissions[category] ?? false,
+          createdAt: timestamp,
+          companyId,
+        },
+      ]);
+      return;
+    }
+
     queueForCategory(category).enqueue([
       buildTask(category, asset.uri, asset.fileName ?? undefined, 'image', taskId, timestamp),
     ]);
@@ -190,6 +225,30 @@ export default function LeadImagePicker({ companyId, onUpdate }: Props) {
     if (result.canceled || !result.assets?.length) return;
 
     const timestamp = Date.now();
+    const { isConnected } = await Network.getNetworkStateAsync();
+    const photoType = category === 'Inspection' ? 'inspectionPhotos' : 'installPhotos';
+
+    if (!isConnected && jobId && category !== 'Documents') {
+      await Promise.all(
+        result.assets.map((asset) => saveImageToVault(jobId, photoType, asset.uri)),
+      );
+      invalidateOfflineMedia(queryClient, jobId);
+      setFiles((prev) => [
+        ...prev,
+        ...result.assets.map((asset, i) => ({
+          id: `${timestamp}_${i}`,
+          url: asset.uri,
+          name: asset.fileName ?? `photo_${timestamp + i}.jpg`,
+          type: 'image' as const,
+          category,
+          isPublic: folderPermissions[category] ?? false,
+          createdAt: timestamp + i,
+          companyId,
+        })),
+      ]);
+      return;
+    }
+
     queueForCategory(category).enqueue(
       result.assets.map((asset, i) =>
         buildTask(

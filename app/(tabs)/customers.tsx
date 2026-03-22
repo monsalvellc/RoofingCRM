@@ -9,8 +9,10 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
-import { useGetAllCustomers } from '../../hooks';
+import { useMergedAllCustomers } from '../../hooks/useMergedData';
 import { Card, Typography } from '../../components/ui';
+import { SyncBadge } from '../../components/ui/SyncBadge';
+import { OfflineBanner } from '../../components/ui/OfflineBanner';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
 import type { Customer } from '../../types';
 
@@ -22,7 +24,7 @@ export default function CustomersScreen() {
   const companyId = userProfile?.companyId ?? '';
 
   // ─── Server State ───────────────────────────────────────────────────────────
-  const { data: allCustomers = [], isLoading, error } = useGetAllCustomers(companyId);
+  const { data: allCustomers = [], isLoading, error } = useMergedAllCustomers(companyId);
 
   // ─── Local UI State ─────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
@@ -82,6 +84,8 @@ export default function CustomersScreen() {
   return (
     <View style={styles.container}>
 
+      <OfflineBanner />
+
       {/* Header */}
       <View style={styles.header}>
         <Typography style={styles.title}>Customers Directory</Typography>
@@ -132,6 +136,7 @@ export default function CustomersScreen() {
                 <Typography style={styles.customerName}>
                   {`${item.firstName || ''} ${item.lastName || ''}`.trim() || '—'}
                 </Typography>
+                {(item as any).isOfflineLead === true && (item as any)._localOnly === true && <SyncBadge />}
 
                 {/* Phone + Email */}
                 {(item.phone || item.email) ? (

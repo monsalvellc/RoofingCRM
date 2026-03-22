@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -14,8 +14,12 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import { usePreferences } from '../../context/PreferencesContext';
-import { useGetAllJobs, useGetAllCustomers, useDeactivateCustomer } from '../../hooks';
+import { useDeactivateCustomer } from '../../hooks';
+import { useSyncContext } from '../../context/SyncContext';
+import { useMergedAllJobs, useMergedAllCustomers } from '../../hooks/useMergedData';
 import { Button, Card, Typography } from '../../components/ui';
+import { SyncBadge } from '../../components/ui/SyncBadge';
+import { OfflineBanner } from '../../components/ui/OfflineBanner';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
 import type { Job } from '../../types';
 
@@ -101,6 +105,91 @@ function getActiveJobId(customerJobs: Job[]): string {
   return sorted.find((j) => j.status !== 'Completed')?.id ?? sorted[0]?.id ?? '';
 }
 
+// ─── Card helpers (module scope — no re-creation per render) ──────────────────
+
+type CustomerGroup = {
+  customerId: string;
+  customerName: string;
+  jobs: Job[];
+  isHidden: boolean;
+};
+
+/** Pure color function for contract amounts. Defined outside the component so
+ *  it is created once at module load, not on every renderItem call. */
+function getJobColor(job: Job): string {
+  if (job.status === 'Completed' && job.balance > 0 && job.completedAt) {
+    if ((Date.now() - new Date(job.completedAt).getTime()) / 86400000 > 5) {
+      return '#FF5F1F';
+    }
+  }
+  if (job.balance > 0) return COLORS.danger;
+  if (job.status === 'Completed' && (job.balance ?? 0) === 0) return COLORS.primary;
+  return COLORS.textMuted;
+}
+
+interface PipelineCardProps {
+  group: CustomerGroup;
+  /** Pre-computed so the card doesn't read the full ledger map itself. */
+  hasPendingSync: boolean;
+  showTopThreeJobs: boolean;
+  onPress: () => void;
+  onLongPress: () => void;
+}
+
+/**
+ * Memoized pipeline card. Re-renders only when its own group data changes,
+ * its pending-sync state flips, or the top-three preference toggles.
+ * Callbacks are intentionally excluded from the comparison — they are always
+ * inline arrows, but their captured values (group.jobs, group.customerId) are
+ * stable whenever `group` itself hasn't changed.
+ */
+const PipelineCard = memo(
+  ({ group, hasPendingSync, showTopThreeJobs, onPress, onLongPress }: PipelineCardProps) => {
+    const displayStatus = getDisplayStatus(group.jobs);
+    const statusColor = STATUS_COLORS[displayStatus] ?? '#999';
+    const jobLimit = showTopThreeJobs ? 3 : 1;
+    const top3Jobs = [...group.jobs]
+      .sort((a, b) => safeParseTime(b.createdAt) - safeParseTime(a.createdAt))
+      .slice(0, jobLimit);
+
+    return (
+      <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={500}>
+        <Card elevation="sm" style={[styles.jobCard, group.isHidden && styles.jobCardHidden]}>
+          <View style={styles.cardTop}>
+            <View style={{ flex: 1, marginRight: SPACING.sm }}>
+              <Typography style={styles.leadName}>
+                {group.customerName || '—'}
+              </Typography>
+              <Typography style={styles.jobCountLabel}>
+                {group.isHidden ? '⚠ Hidden  ·  ' : ''}
+                {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'}
+              </Typography>
+            </View>
+            <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
+              <Typography style={styles.statusText}>{displayStatus}</Typography>
+            </View>
+          </View>
+          {hasPendingSync && <SyncBadge />}
+          <View style={styles.cardBottom}>
+            <View style={styles.financialRow}>
+              <Typography style={styles.contractLabel}>Contracts:</Typography>
+              {top3Jobs.map((job) => (
+                <Typography key={job.id} style={[styles.jobAmount, { color: getJobColor(job) }]}>
+                  ${(job.contractAmount || 0).toLocaleString()}
+                </Typography>
+              ))}
+            </View>
+          </View>
+        </Card>
+      </Pressable>
+    );
+  },
+  (prev, next) =>
+    prev.group === next.group &&
+    prev.hasPendingSync === next.hasPendingSync &&
+    prev.showTopThreeJobs === next.showTopThreeJobs,
+);
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function DashboardScreen() {
@@ -110,9 +199,10 @@ export default function DashboardScreen() {
   const companyId = userProfile?.companyId ?? '';
 
   // ─── Server State ───────────────────────────────────────────────────────────
-  const { data: allJobs = [], isLoading, error } = useGetAllJobs(companyId);
-  const { data: allCustomers = [] } = useGetAllCustomers(companyId);
+  const { data: allJobs = [], isLoading, error } = useMergedAllJobs(companyId);
+  const { data: allCustomers = [] } = useMergedAllCustomers(companyId);
   const { mutate: deactivateCustomerMutate } = useDeactivateCustomer();
+  const { ledger } = useSyncContext();
 
   // ─── Local UI State ─────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
@@ -251,7 +341,7 @@ export default function DashboardScreen() {
     setIsFilterModalVisible(false);
   };
 
-  const handleLongPressCard = (customerId: string, customerName: string) => {
+  const handleLongPressCard = useCallback((customerId: string, customerName: string) => {
     // Only allow deactivation outside of the company view — in company view the
     // card is shown for oversight and long-press would be confusing.
     if (viewMode === 'company') return;
@@ -277,7 +367,24 @@ export default function DashboardScreen() {
         },
       ],
     );
-  };
+  }, [viewMode, userProfile, deactivateCustomerMutate]);
+
+  const renderItem = useCallback(
+    ({ item: group }: { item: CustomerGroup }) => {
+      const activeJobId = getActiveJobId(group.jobs);
+      const hasPendingSync = group.jobs.some((j) => (ledger[j.id] ?? 0) > 0);
+      return (
+        <PipelineCard
+          group={group}
+          hasPendingSync={hasPendingSync}
+          showTopThreeJobs={showTopThreeJobs}
+          onPress={() => router.push(`/job/${activeJobId}`)}
+          onLongPress={() => handleLongPressCard(group.customerId, group.customerName)}
+        />
+      );
+    },
+    [ledger, showTopThreeJobs, router, handleLongPressCard],
+  );
 
   const clearFilters = () => {
     setPendingStatus(null);
@@ -318,6 +425,8 @@ export default function DashboardScreen() {
 
   return (
     <View style={styles.container}>
+
+      <OfflineBanner />
 
       {/* Header */}
       <View style={styles.header}>
@@ -442,61 +551,11 @@ export default function DashboardScreen() {
           data={filteredCustomerGroups}
           keyExtractor={(item) => item.customerId}
           contentContainerStyle={styles.list}
-          renderItem={({ item: group }) => {
-            const displayStatus = getDisplayStatus(group.jobs);
-            const statusColor = STATUS_COLORS[displayStatus] ?? '#999';
-            const activeJobId = getActiveJobId(group.jobs);
-            const jobLimit = showTopThreeJobs ? 3 : 1;
-            const top3Jobs = [...group.jobs]
-              .sort((a, b) => safeParseTime(b.createdAt) - safeParseTime(a.createdAt))
-              .slice(0, jobLimit);
-
-            const getJobColor = (job: Job): string => {
-              if (job.status === 'Completed' && job.balance > 0 && job.completedAt) {
-                if ((Date.now() - new Date(job.completedAt).getTime()) / 86400000 > 5) {
-                  return '#FF5F1F';
-                }
-              }
-              if (job.balance > 0) return COLORS.danger;
-              if (job.status === 'Completed' && (job.balance ?? 0) === 0) return COLORS.primary;
-              return COLORS.textMuted;
-            };
-
-            return (
-              <Pressable
-                onPress={() => router.push(`/job/${activeJobId}`)}
-                onLongPress={() => handleLongPressCard(group.customerId, group.customerName)}
-                delayLongPress={500}
-              >
-                <Card elevation="sm" style={[styles.jobCard, group.isHidden && styles.jobCardHidden]}>
-                  <View style={styles.cardTop}>
-                    <View style={{ flex: 1, marginRight: SPACING.sm }}>
-                      <Typography style={styles.leadName}>
-                        {group.customerName || '—'}
-                      </Typography>
-                      <Typography style={styles.jobCountLabel}>
-                        {group.isHidden ? '⚠ Hidden  ·  ' : ''}
-                        {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'}
-                      </Typography>
-                    </View>
-                    <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
-                      <Typography style={styles.statusText}>{displayStatus}</Typography>
-                    </View>
-                  </View>
-                  <View style={styles.cardBottom}>
-                    <View style={styles.financialRow}>
-                      <Typography style={styles.contractLabel}>Contracts:</Typography>
-                      {top3Jobs.map((job) => (
-                        <Typography key={job.id} style={[styles.jobAmount, { color: getJobColor(job) }]}>
-                          ${(job.contractAmount || 0).toLocaleString()}
-                        </Typography>
-                      ))}
-                    </View>
-                  </View>
-                </Card>
-              </Pressable>
-            );
-          }}
+          renderItem={renderItem}
+          initialNumToRender={10}
+          maxToRenderPerBatch={5}
+          windowSize={5}
+          removeClippedSubviews
         />
       )}
 

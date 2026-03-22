@@ -4,20 +4,38 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from '../context/AuthContext';
 import { PreferencesProvider } from '../context/PreferencesContext';
+import { SyncProvider } from '../context/SyncContext';
 import { getCompany } from '../services';
 import type { Company } from '../types';
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // Data is considered fresh for 2 minutes — prevents redundant refetches
+      // Data is considered fresh for 5 minutes — prevents redundant refetches
       // when navigating between screens quickly.
-      staleTime: 1000 * 60 * 2,
+      staleTime: 1000 * 60 * 5,
       // Keep unused cached data in memory for 10 minutes after a component
       // unmounts, so navigating back feels instant.
       gcTime: 1000 * 60 * 10,
-      // Retry failed queries up to 2 times before surfacing the error to UI.
-      retry: 2,
+      // Never retry Firebase permission errors — they won't self-heal and
+      // exponential backoff would visibly freeze the UI. Allow up to 2 retries
+      // for transient network failures only.
+      retry: (failureCount: number, error: unknown) => {
+        if (
+          error instanceof Error &&
+          error.message.toLowerCase().includes('permission')
+        ) {
+          return false;
+        }
+        return failureCount < 2;
+      },
+      // Always run queryFn even when the OS reports no network — lets Firestore
+      // serve data from its in-memory cache instead of React Query blocking the call.
+      networkMode: 'offlineFirst',
+    },
+    mutations: {
+      // Same: let Firestore handle the write queue; don't pause mutations offline.
+      networkMode: 'offlineFirst',
     },
   },
 });
@@ -113,27 +131,30 @@ function NavigationGuard() {
 
   return (
     <Stack
-      screenOptions={{
-        headerStyle: { backgroundColor: '#2e7d32' },
-        headerTintColor: '#fff',
-        headerTitleStyle: { fontWeight: '700' },
-      }}
-    >
-      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      <Stack.Screen name="inactive-subscription" options={{ headerShown: false }} />
-      <Stack.Screen name="access-revoked" options={{ headerShown: false }} />
-    </Stack>
+        screenOptions={{
+          headerStyle: { backgroundColor: '#2e7d32' },
+          headerTintColor: '#fff',
+          headerTitleStyle: { fontWeight: '700' },
+          headerBackTitle: 'Back',
+        }}
+      >
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="inactive-subscription" options={{ headerShown: false }} />
+        <Stack.Screen name="access-revoked" options={{ headerShown: false }} />
+      </Stack>
   );
 }
 
 export default function RootLayout() {
   return (
     <QueryClientProvider client={queryClient}>
-      <PreferencesProvider>
-        <AuthProvider>
-          <NavigationGuard />
-        </AuthProvider>
-      </PreferencesProvider>
+      <SyncProvider>
+        <PreferencesProvider>
+          <AuthProvider>
+            <NavigationGuard />
+          </AuthProvider>
+        </PreferencesProvider>
+      </SyncProvider>
     </QueryClientProvider>
   );
 }

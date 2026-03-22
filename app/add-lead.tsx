@@ -12,10 +12,12 @@ import {
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import * as Location from 'expo-location';
-import type { JobMedia } from '../types';
+import { collection, doc } from 'firebase/firestore';
+import { db } from '../config/firebaseConfig';
+import { COLLECTIONS } from '../constants/config';
 import { useAuth } from '../context/AuthContext';
-import LeadImagePicker from '../components/LeadImagePicker';
-import { useCreateCustomer, useCreateJob, useGetAllCustomers } from '../hooks';
+import { useCreateCustomer, useCreateJob, useGetAllCustomers, useOfflineVaultCounts, OFFLINE_ENTITY_LIMIT } from '../hooks';
+import { OfflineBanner } from '../components/ui/OfflineBanner';
 import { Button, Card, Typography, TextInput } from '../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../constants/theme';
 import type { Customer, Job } from '../types';
@@ -75,6 +77,12 @@ export default function AddLeadScreen() {
 
   const isSaving = isCreatingCustomer || isCreatingJob;
 
+  // ─── Offline Vault Limit ─────────────────────────────────────────────────────
+  // Block creation when offline and either entity queue is already full.
+  // Re-reads the vault on mount; call refresh() after a successful save so a
+  // second attempt on the same screen sees the updated count.
+  const { isAtLimit, isOfflineMode, refresh: refreshVaultCounts } = useOfflineVaultCounts();
+
   // ─── Existing Customer Selection ─────────────────────────────────────────────
   const [selectedExistingCustomer, setSelectedExistingCustomer] = useState<Customer | null>(null);
 
@@ -88,7 +96,9 @@ export default function AddLeadScreen() {
   const [notes, setNotes] = useState('');
 
   // ─── Job Fields ──────────────────────────────────────────────────────────────
-  const [jobId] = useState(() => `JOB-${Date.now()}`);
+  // Pre-generate the Firestore document ID so we can navigate to /job/<id>
+  // immediately after save without waiting for a server round-trip.
+  const [jobId] = useState(() => doc(collection(db, COLLECTIONS.jobs)).id);
   const [jobName, setJobName] = useState('');
   const [jobDescription, setJobDescription] = useState('');
   const [measurements, setMeasurements] = useState('');
@@ -106,9 +116,6 @@ export default function AddLeadScreen() {
   const [payments, setPayments] = useState<number[]>([]);
   const [newPayment, setNewPayment] = useState('');
 
-  // ─── Files ───────────────────────────────────────────────────────────────────
-  const [mediaFiles, setMediaFiles] = useState<JobMedia[]>([]);
-  const [folderPermissions, setFolderPermissions] = useState<Record<string, boolean>>({});
 
   // ─── Insurance ───────────────────────────────────────────────────────────────
   const [carrier, setCarrier] = useState('');
@@ -182,6 +189,13 @@ export default function AddLeadScreen() {
   };
 
   const handleSave = async () => {
+    if (isAtLimit) {
+      Alert.alert(
+        'Offline Limit Reached',
+        `You can only save ${OFFLINE_ENTITY_LIMIT} leads while offline. Please sync your pending leads before creating more.`,
+      );
+      return;
+    }
     const nameParts = name.trim().split(/\s+/);
     const firstName = nameParts[0] || '';
     const lastName = nameParts.slice(1).join(' ') || '';
@@ -192,9 +206,6 @@ export default function AddLeadScreen() {
 
     const parsedDeductible = parseFloat(deductible.replace(/[^0-9.]/g, '')) || 0;
     const now = Date.now();
-
-    const inspectionPhotos = mediaFiles.filter((m) => m.category === 'inspection');
-    const installPhotos = mediaFiles.filter((m) => m.category === 'install');
 
     // Build actor for audit logging — null-safe so save never blocks on missing profile
     const actor = userProfile
@@ -250,6 +261,7 @@ export default function AddLeadScreen() {
         customerId,
         companyId,
         jobId,
+        presetId: jobId,
         assignedUserIds: user?.uid ? [user.uid] : [],
         status,
         createdAt: now,
@@ -282,23 +294,13 @@ export default function AddLeadScreen() {
         installersCost: 0,
         guttersCost: 0,
         files: [],
-        folderPermissions,
-        inspectionPhotos,
-        installPhotos,
+        folderPermissions: {},
+        inspectionPhotos: [],
+        installPhotos: [],
       });
 
-      Alert.alert('Success', 'Customer & Job Saved', [
-        {
-          text: 'OK',
-          onPress: () => {
-            if (router.canGoBack()) {
-              router.back();
-            } else {
-              router.replace('/');
-            }
-          },
-        },
-      ]);
+      refreshVaultCounts();
+      router.replace(`/job/${jobId}`);
     } catch (e: any) {
       Alert.alert('Save Failed', e.message ?? 'An unexpected error occurred.');
     }
@@ -670,15 +672,15 @@ export default function AddLeadScreen() {
             </>
           )}
 
-          {/* ── Files ── */}
-          <Typography style={styles.sectionTitle}>Files</Typography>
-          <LeadImagePicker
-            companyId={companyId}
-            onUpdate={(media, perms) => {
-              setMediaFiles(media);
-              setFolderPermissions(perms);
-            }}
-          />
+
+          {/* ── Offline limit warning ── */}
+          {isOfflineMode && isAtLimit && (
+            <View style={styles.offlineLimitBanner}>
+              <Typography style={styles.offlineLimitText}>
+                Offline limit reached (max {OFFLINE_ENTITY_LIMIT} leads). Sync your pending leads first.
+              </Typography>
+            </View>
+          )}
 
           {/* ── Save ── */}
           <Button
@@ -686,7 +688,7 @@ export default function AddLeadScreen() {
             size="lg"
             label={isSaving ? 'Saving...' : 'SAVE LEAD'}
             onPress={handleSave}
-            disabled={!isFormValid || isSaving}
+            disabled={!isFormValid || isSaving || isAtLimit}
             isLoading={isSaving}
             style={styles.saveButton}
           />
@@ -995,5 +997,21 @@ const styles = StyleSheet.create({
   saveButton: {
     marginTop: SPACING.xxl,
     borderRadius: RADIUS.xl,
+  },
+
+  // Offline limit warning
+  offlineLimitBanner: {
+    backgroundColor: '#fff3f3',
+    borderRadius: RADIUS.md,
+    padding: SPACING.md,
+    marginTop: SPACING.md,
+    borderWidth: 1,
+    borderColor: COLORS.danger,
+  },
+  offlineLimitText: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.danger,
+    textAlign: 'center',
   },
 });

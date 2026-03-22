@@ -3,3 +3,7 @@ export * from './useJobs';
 export * from './useCustomers';
 export * from './useUsers';
 export * from './useUploadQueue';
+export * from './useMergedData';
+export * from './useVaultImages';
+export * from './useVaultJobIds';
+export * from './useOfflineVaultCounts';
