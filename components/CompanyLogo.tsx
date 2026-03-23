@@ -1,21 +1,19 @@
 /**
  * CompanyLogo — floating company branding mark.
  *
- * Renders the company's logo from Firestore in the top-right corner of
- * whichever screen it is placed inside. Returns null gracefully while
- * loading, on error, or when no logoUrl is stored.
+ * Renders the company logo in the top-right corner, just below the notch /
+ * Dynamic Island. Returns null while loading, on error, or when no logoUrl.
  *
- * Usage (place as a sibling of the main screen content, inside SafeAreaView):
- *   <SafeAreaView style={{ flex: 1 }} edges={['top', 'left', 'right']}>
- *     <CompanyLogo />
+ * Placement: absolute-positioned — place at the BOTTOM of the JSX tree so it
+ * renders above all siblings without fighting z-index stacking contexts.
+ *
+ *   <View style={{ flex: 1 }}>
  *     <YourScreenContent />
- *   </SafeAreaView>
- *
- * The logo is position: 'absolute' so it floats over the header without
- * affecting the layout of any other element.
+ *     <CompanyLogo />   ← always last
+ *   </View>
  */
 
-import { StyleSheet } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../context/AuthContext';
@@ -26,37 +24,40 @@ export function CompanyLogo() {
   const { userProfile } = useAuth();
   const companyId = userProfile?.companyId ?? '';
 
-  // useGetCompany is already enabled-guarded: skips the query when companyId is empty.
-  // React Query caches the result, so placing this on multiple screens is zero-cost
-  // after the first fetch.
   const { data: company } = useGetCompany(companyId);
 
-  // Nothing to render until the URL is confirmed non-empty.
   if (!company?.logoUrl) return null;
 
   return (
-    <Image
-      source={{ uri: company.logoUrl }}
-      style={[styles.logo, { top: insets.top + 16 }]}
-      contentFit="contain"
-      // memory-disk: serves from in-memory cache on repeated renders; falls back
-      // to disk so the logo never re-fetches on tab switches.
-      cachePolicy="memory-disk"
-      // Accessibility: treat as decorative — the company name is visible elsewhere.
-      accessibilityIgnoresInvertColors
-    />
+    <View style={[styles.container, { top: insets.top + 8 }]}>
+      <Image
+
+        source={{ uri: company?.logoUrl }} 
+        style={styles.logo} 
+        contentFit="contain"
+        cachePolicy="memory-disk" 
+        transition={200}
+        
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  logo: {
+  container: {
     position: 'absolute',
-    top: 16,
     right: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 8,
     zIndex: 100,
     elevation: 10,
+    // Subtle drop shadow so the logo lifts off the green header on iOS.
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+  },
+  logo: {
+    width: 60,
+    height: 60,
+    borderRadius: 10,
   },
 });

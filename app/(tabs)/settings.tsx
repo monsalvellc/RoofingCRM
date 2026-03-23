@@ -92,7 +92,7 @@ export default function SettingsScreen() {
     <View style={styles.container}>
 
       {/* ── Header ── */}
-      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.xl }]}>
         <Typography style={styles.title}>Settings</Typography>
       </View>
 

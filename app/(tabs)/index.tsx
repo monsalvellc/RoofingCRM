@@ -432,7 +432,7 @@ export default function DashboardScreen() {
       <OfflineBanner />
 
       {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.xl }]}>
         <Typography style={styles.greeting}>
           Welcome, {userProfile?.firstName || 'User'}
         </Typography>
