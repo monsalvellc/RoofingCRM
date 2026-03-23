@@ -10,8 +10,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { CompanyLogo } from '../../components/CompanyLogo';
 import { useAuth } from '../../context/AuthContext';
 import { usePreferences } from '../../context/PreferencesContext';
 import { useDeactivateCustomer } from '../../hooks';
@@ -194,6 +196,7 @@ const PipelineCard = memo(
 
 export default function DashboardScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { user, userProfile } = useAuth();
   const { showTopThreeJobs } = usePreferences();
   const companyId = userProfile?.companyId ?? '';
@@ -429,7 +432,7 @@ export default function DashboardScreen() {
       <OfflineBanner />
 
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
         <Typography style={styles.greeting}>
           Welcome, {userProfile?.firstName || 'User'}
         </Typography>
@@ -440,6 +443,8 @@ export default function DashboardScreen() {
           Customers
         </Typography>
       </View>
+
+      <View style={styles.mainContent}>
 
       {/* View mode segmented control */}
       <View style={styles.segmentContainer}>
@@ -564,6 +569,8 @@ export default function DashboardScreen() {
         <Typography style={styles.fabText}>+</Typography>
       </Pressable>
 
+      </View>
+
       {/* ── Filter Modal ── */}
       <Modal
         visible={isFilterModalVisible}
@@ -652,6 +659,9 @@ export default function DashboardScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Floats over all siblings; absolute-positioned at bottom of tree so it renders on top. */}
+      <CompanyLogo />
     </View>
   );
 }
@@ -661,20 +671,30 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    // Match the header colour so the status-bar area (inside SafeAreaView)
+    // shows green rather than a mismatched background flash.
+    backgroundColor: COLORS.primary,
   },
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: COLORS.background,
+  },
+  mainContent: {
+    flex: 1,
+    backgroundColor: COLORS.background,
   },
 
-  // Header
+  // Header — paddingTop reduced from 60 to SPACING.base now that SafeAreaView
+  // from react-native-safe-area-context handles the status-bar inset.
   header: {
     backgroundColor: COLORS.primary,
-    paddingTop: 60,
+    paddingTop: SPACING.base,
     paddingBottom: 24,
-    paddingHorizontal: 24,
+    // Right padding reserves space for the CompanyLogo (40px) + its 16px margin.
+    paddingRight: 64,
+    paddingLeft: 24,
   },
   greeting: {
     fontSize: 26,

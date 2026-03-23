@@ -10,10 +10,39 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import Constants from 'expo-constants';
-import { auth, db } from '../../config/firebaseConfig';
+import { auth, db, storage } from '../../config/firebaseConfig';
 import { COLLECTIONS } from '../../constants/config';
 import type { Company, SalesRep } from '../../types';
+
+// ─── Logo Upload ──────────────────────────────────────────────────────────────
+
+/**
+ * Converts a local image URI to a blob, uploads it to Firebase Storage at
+ * `companies/{companyId}/logo_{timestamp}.jpg`, persists the download URL to
+ * the Firestore companies document, and returns the download URL.
+ */
+export async function uploadCompanyLogo(
+  companyId: string,
+  imageUri: string,
+): Promise<string> {
+  try {
+    const response = await fetch(imageUri);
+    const blob = await response.blob();
+
+    const storageRef = ref(storage, `companies/${companyId}/logo_${Date.now()}.jpg`);
+    await uploadBytes(storageRef, blob);
+
+    const downloadURL = await getDownloadURL(storageRef);
+    await updateDoc(doc(db, COLLECTIONS.companies, companyId), { logoUrl: downloadURL });
+
+    return downloadURL;
+  } catch (error) {
+    console.error('[companiesService] uploadCompanyLogo failed:', error);
+    throw new Error('Failed to upload logo. Please try again.');
+  }
+}
 
 // ─── Company ──────────────────────────────────────────────────────────────────
 

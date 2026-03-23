@@ -28,6 +28,8 @@ export interface SalesRep {
   expiresAt?: string | number;
 }
 
+import type { CompensationPlan } from '../utils/financeUtils';
+
 export interface UserProfile {
   id: string;
   email: string;
@@ -42,4 +44,6 @@ export interface UserProfile {
   allowHdToggle?: boolean;
   /** User preference: upload photos at full resolution when true. */
   hdPhotosEnabled?: boolean;
+  /** ERP payroll plan assigned to this user by an admin. */
+  compensation?: CompensationPlan;
 }

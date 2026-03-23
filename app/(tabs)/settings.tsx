@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
@@ -7,11 +8,16 @@ import {
   Switch,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import { useQueryClient } from '@tanstack/react-query';
+import { CompanyLogo } from '../../components/CompanyLogo';
 import { useAuth } from '../../context/AuthContext';
 import { usePreferences } from '../../context/PreferencesContext';
 import { useUpdateUserProfile } from '../../hooks';
+import { uploadCompanyLogo } from '../../services/firebase/companiesService';
 import { Button, Card, Typography } from '../../components/ui';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../constants/theme';
 
@@ -19,12 +25,15 @@ import { COLORS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../constants/theme';
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { userProfile, logout } = useAuth();
   const { mutate: updateProfile } = useUpdateUserProfile();
   const { showTopThreeJobs, toggleShowTopThreeJobs } = usePreferences();
+  const queryClient = useQueryClient();
 
   // Optimistic local state for the HD toggle so the switch reflects changes immediately
   const [hdEnabled, setHdEnabled] = useState(userProfile?.hdPhotosEnabled ?? false);
+  const [isUploading, setIsUploading] = useState(false);
 
   // ─── Handlers ────────────────────────────────────────────────────────────────
 
@@ -34,6 +43,31 @@ export default function SettingsScreen() {
       { hdPhotosEnabled: newValue },
       { onError: () => setHdEnabled(!newValue) }, // revert on failure
     );
+  };
+
+  const handlePickAndUploadLogo = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.5,
+    });
+
+    if (result.canceled || !result.assets?.[0]?.uri) return;
+
+    const companyId = userProfile?.companyId ?? '';
+    if (!companyId) return;
+
+    setIsUploading(true);
+    try {
+      await uploadCompanyLogo(companyId, result.assets[0].uri);
+      await queryClient.invalidateQueries({ queryKey: ['company', companyId] });
+      Alert.alert('Success', 'Company logo updated.');
+    } catch {
+      Alert.alert('Error', 'Failed to upload logo. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleSignOut = async () => {
@@ -58,10 +92,11 @@ export default function SettingsScreen() {
     <View style={styles.container}>
 
       {/* ── Header ── */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
         <Typography style={styles.title}>Settings</Typography>
       </View>
 
+      <View style={styles.mainContent}>
       <ScrollView contentContainerStyle={styles.body}>
 
         {/* ── Admin Controls (SuperAdmin only) ── */}
@@ -73,6 +108,22 @@ export default function SettingsScreen() {
                 <Ionicons name="people" size={20} color={COLORS.primary} style={styles.navIcon} />
                 <Typography style={styles.navLabel}>Manage Team & Seats</Typography>
                 <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+            </Card>
+
+            <Typography style={styles.sectionLabel}>Company Branding</Typography>
+            <Card elevation="sm" style={styles.cardPadding}>
+              <Pressable
+                style={styles.navRow}
+                onPress={handlePickAndUploadLogo}
+                disabled={isUploading}
+              >
+                <Ionicons name="image-outline" size={20} color={COLORS.primary} style={styles.navIcon} />
+                <Typography style={styles.navLabel}>Upload Company Logo</Typography>
+                {isUploading
+                  ? <ActivityIndicator size="small" color={COLORS.primary} />
+                  : <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                }
               </Pressable>
             </Card>
           </>
@@ -130,6 +181,10 @@ export default function SettingsScreen() {
         />
 
       </ScrollView>
+      </View>
+
+      {/* Floats over all siblings; absolute-positioned at bottom of tree so it renders on top. */}
+      <CompanyLogo />
     </View>
   );
 }
@@ -150,13 +205,19 @@ function Row({ label, value }: { label: string; value: string }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: COLORS.primary,
+  },
+  mainContent: {
+    flex: 1,
     backgroundColor: COLORS.background,
   },
+  // Header — paddingTop reduced from 60; SafeAreaView now owns the status-bar inset.
   header: {
     backgroundColor: COLORS.primary,
-    paddingTop: 60,
+    paddingTop: SPACING.base,
     paddingBottom: 24,
-    paddingHorizontal: 24,
+    paddingRight: 64,
+    paddingLeft: 24,
   },
   title: {
     fontSize: 26,

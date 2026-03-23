@@ -7,8 +7,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
+import { CompanyLogo } from '../../components/CompanyLogo';
 import { useMergedAllCustomers } from '../../hooks/useMergedData';
 import { Card, Typography } from '../../components/ui';
 import { SyncBadge } from '../../components/ui/SyncBadge';
@@ -20,6 +22,7 @@ import type { Customer } from '../../types';
 
 export default function CustomersScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { userProfile } = useAuth();
   const companyId = userProfile?.companyId ?? '';
 
@@ -87,12 +90,14 @@ export default function CustomersScreen() {
       <OfflineBanner />
 
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
         <Typography style={styles.title}>Customers Directory</Typography>
         <Typography style={styles.headerSubtitle}>
           {filteredCustomers.length} Total
         </Typography>
       </View>
+
+      <View style={styles.mainContent}>
 
       {/* Search bar */}
       <View style={styles.searchRow}>
@@ -167,6 +172,11 @@ export default function CustomersScreen() {
           )}
         />
       )}
+
+      </View>
+
+      {/* Floats over all siblings; absolute-positioned at bottom of tree so it renders on top. */}
+      <CompanyLogo />
     </View>
   );
 }
@@ -176,20 +186,26 @@ export default function CustomersScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: COLORS.primary,
+  },
+  mainContent: {
+    flex: 1,
     backgroundColor: COLORS.background,
   },
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: COLORS.background,
   },
 
-  // Header
+  // Header — paddingTop reduced from 60; SafeAreaView now owns the status-bar inset.
   header: {
     backgroundColor: COLORS.primary,
-    paddingTop: 60,
+    paddingTop: SPACING.base,
     paddingBottom: 24,
-    paddingHorizontal: 24,
+    paddingRight: 64,
+    paddingLeft: 24,
   },
   title: {
     fontSize: 26,
