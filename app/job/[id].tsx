@@ -31,21 +31,19 @@ import {
   useAddJobDocument,
   useDeleteJobDocument,
   useCustomerJobsListener,
-  useUploadQueue,
   jobKeys,
 } from '../../hooks';
-import { useOfflineMedia } from '../../hooks/useOfflineMedia';
-import { saveMediaToVault } from '../../utils/mediaVault';
-import { useSyncContext } from '../../context/SyncContext';
 const Network = require('expo-network') as {
   getNetworkStateAsync: () => Promise<{ isConnected: boolean | null }>;
 };
 import { useGetCustomer, useUpdateCustomer } from '../../hooks';
 import { useHdPhotoQuality } from '../../hooks';
 import { useQueryClient } from '@tanstack/react-query';
-import { uploadJobPhoto, appendJobMedia } from '../../services';
 import { useAuth } from '../../context/AuthContext';
 import { Button, Card, Typography, TextInput as UITextInput } from '../../components/ui';
+import { ImageCommentModal } from '../../components/ImageCommentModal';
+import { ReportGeneratorModal } from '../../components/ReportGeneratorModal';
+import { uploadJobPhotoDirect } from '../../services/firebase/storageService';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, RADIUS, SPACING } from '../../constants/theme';
 import type { Job, JobFile, JobMedia } from '../../types';
 
@@ -132,23 +130,6 @@ export default function JobDetailScreen() {
   const customerJobs = useCustomerJobsListener(job?.customerId ?? '', job?.companyId ?? '');
   const queryClient = useQueryClient();
 
-  // Separate queue per photo folder — lets each section show its own in-flight items.
-  const inspectionQueue = useUploadQueue();
-  const installQueue = useUploadQueue();
-
-  // Offline media — vault reads and per-screen gallery refresh.
-  const {
-    pendingInspectionPhotos,
-    pendingInstallPhotos,
-    pendingDocuments,
-    pendingCount,
-    refreshMedia,
-  } = useOfflineMedia(id);
-
-  // Global sync engine — badge ledger, in-flight state, upload trigger.
-  const { addPending, triggerSync, activeSyncs } = useSyncContext();
-  const isSyncing = activeSyncs[id] === true;
-
   const isUploading = isUploadingDoc;
 
   // Defers rendering the full tab content until the navigation slide animation
@@ -173,6 +154,13 @@ export default function JobDetailScreen() {
   // Media edit modal
   const [selectedMedia, setSelectedMedia] = useState<JobMedia | null>(null);
   const [editingMediaShared, setEditingMediaShared] = useState(false);
+  const [editingMediaComment, setEditingMediaComment] = useState('');
+
+  // Upload comment modal — staged photo waiting for a comment before enqueue
+  const [pendingUpload, setPendingUpload] = useState<{
+    uris: string[];
+    photoType: 'inspectionPhotos' | 'installPhotos';
+  } | null>(null);
 
   // Edit details modal
   const [isEditingDetails, setIsEditingDetails] = useState(false);
@@ -198,6 +186,9 @@ export default function JobDetailScreen() {
     leadSource: '',
     notes: '',
   });
+
+  // Report generator modal
+  const [isReportModalVisible, setIsReportModalVisible] = useState(false);
 
   // Add Job modal
   const [isAddingJobModal, setIsAddingJobModal] = useState(false);
@@ -351,6 +342,7 @@ export default function JobDetailScreen() {
   const openMediaModal = (media: JobMedia) => {
     setSelectedMedia(media);
     setEditingMediaShared(media.shared);
+    setEditingMediaComment(media.comment ?? '');
   };
 
   // ─── Handlers — Media Updates ────────────────────────────────────────────
@@ -358,7 +350,7 @@ export default function JobDetailScreen() {
   const handleUpdateMedia = () => {
     if (!selectedMedia || !job) return;
     const photoField = selectedMedia.category === 'inspection' ? 'inspectionPhotos' : 'installPhotos';
-    const updatedMedia: JobMedia = { ...selectedMedia, shared: editingMediaShared };
+    const updatedMedia: JobMedia = { ...selectedMedia, shared: editingMediaShared, comment: editingMediaComment };
     const updatedList = ((job as any)[photoField] as JobMedia[]).map((m: JobMedia) =>
       m.id === selectedMedia.id ? updatedMedia : m,
     );
@@ -474,9 +466,7 @@ export default function JobDetailScreen() {
 
     const { isConnected } = await Network.getNetworkStateAsync();
     if (!isConnected) {
-      await saveMediaToVault(id, 'documents', asset.uri, asset.name);
-      await addPending(id, 1);
-      await refreshMedia();
+      Alert.alert('Offline', 'You must be connected to the internet to upload files.');
       return;
     }
 
@@ -497,72 +487,114 @@ export default function JobDetailScreen() {
       Alert.alert('Permission Required', 'Camera access is needed to take photos.');
       return;
     }
-    const result = await ImagePicker.launchCameraAsync({ quality: imageQuality });
+    const result = await ImagePicker.launchCameraAsync({
+      quality: imageQuality,
+      allowsEditing: false,
+      maxWidth: 2048,
+      maxHeight: 2048,
+    });
     if (result.canceled) return;
 
     const { isConnected } = await Network.getNetworkStateAsync();
-    const sourceUri = result.assets[0].uri;
-
     if (!isConnected) {
-      // ── Offline: persist to vault so the photo survives app restarts ─────
-      await saveMediaToVault(id, photoType, sourceUri);
-      await addPending(id, 1);
-      await refreshMedia();
+      Alert.alert('Offline', 'You must be connected to the internet to upload files.');
       return;
     }
 
-    // ── Online: enqueue for immediate upload with progress UI ─────────────
-    const queue = photoType === 'inspectionPhotos' ? inspectionQueue : installQueue;
-    const taskId = Date.now().toString();
-    queue.enqueue([{
-      id: taskId,
-      sourceUri,
-      uploadFn: async (uri, onProgress) => {
-        const media = await uploadJobPhoto(id, photoType, uri, taskId, onProgress);
-        await appendJobMedia(id, photoType, media);
-        queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
-      },
-    }]);
+    setPendingUpload({ uris: [result.assets[0].uri], photoType });
   };
 
   const handleGalleryPhoto = async (photoType: 'inspectionPhotos' | 'installPhotos') => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: imageQuality,
+      allowsEditing: false,
       allowsMultipleSelection: true,
       selectionLimit: 10,
+      maxWidth: 2048,
+      maxHeight: 2048,
     });
     if (result.canceled) return;
 
     const { isConnected } = await Network.getNetworkStateAsync();
-
     if (!isConnected) {
-      // ── Offline: persist every selected photo to vault ────────────────────
-      // Sequential loop with a unique per-asset suffix prevents filename
-      // collisions when multiple photos share the same Date.now() millisecond.
-      const batchId = Date.now();
-      for (let i = 0; i < result.assets.length; i++) {
-        await saveMediaToVault(id, photoType, result.assets[i].uri, `${batchId}_${i}`);
-      }
-      await addPending(id, result.assets.length);
-      await refreshMedia();
+      Alert.alert('Offline', 'You must be connected to the internet to upload files.');
       return;
     }
 
-    // ── Online: enqueue for immediate upload with progress UI ─────────────
-    const queue = photoType === 'inspectionPhotos' ? inspectionQueue : installQueue;
-    const timestamp = Date.now();
-    queue.enqueue(
-      result.assets.map((asset, i) => ({
-        id: `${timestamp}_${i}`,
-        sourceUri: asset.uri,
-        uploadFn: async (uri: string, onProgress: (p: number) => void) => {
-          const media = await uploadJobPhoto(id, photoType, uri, `${timestamp}_${i}`, onProgress);
-          await appendJobMedia(id, photoType, media);
-          queryClient.invalidateQueries({ queryKey: jobKeys.detail(id) });
-        },
-      })),
+    // Gallery uploads bypass the comment modal — batch-applying one comment
+    // to multiple photos causes data issues. Upload immediately with no comment.
+    executeUpload(result.assets.map((a: { uri: string }) => a.uri), photoType, '');
+  };
+
+  // Core upload engine — shared by handleCommitUpload (camera, with comment)
+  // and handleGalleryPhoto (gallery, no comment). Injects optimistic thumbnails
+  // into the React Query cache immediately, uploads all URIs concurrently via
+  // Firebase Storage, then performs a single Firestore write on completion.
+  const executeUpload = async (
+    uris: string[],
+    photoType: 'inspectionPhotos' | 'installPhotos',
+    comment: string,
+  ) => {
+    const PENDING_PREFIX = 'pending_';
+    const category = photoType === 'inspectionPhotos' ? 'inspection' : 'install';
+
+    // 1. Build optimistic items with stable client IDs so we can swap them out.
+    const pendingItems: JobMedia[] = uris.map((uri, i) => ({
+      id: `${PENDING_PREFIX}${Date.now()}_${i}`,
+      url: uri, // local picker URI — renders as a thumbnail while uploading
+      category: category as 'inspection' | 'install',
+      shared: false,
+      uploadedAt: new Date().toISOString(),
+      comment,
+    }));
+
+    // 2. Inject into cache — gallery shows thumbnails with "Uploading…" badge.
+    queryClient.setQueryData(jobKeys.detail(id), (prev: any) => {
+      if (!prev) return prev;
+      return { ...prev, [photoType]: [...(prev[photoType] ?? []), ...pendingItems] };
+    });
+
+    // 3. Upload all files to Firebase Storage concurrently.
+    const results = await Promise.allSettled(
+      uris.map((uri) => uploadJobPhotoDirect(id, photoType, uri, comment)),
     );
+
+    const confirmed: JobMedia[] = results
+      .filter((r): r is PromiseFulfilledResult<JobMedia> => r.status === 'fulfilled')
+      .map((r) => r.value);
+    const failedCount = results.filter((r) => r.status === 'rejected').length;
+
+    // 4. Swap pending items out of cache, insert confirmed entries.
+    const pendingIds = new Set(pendingItems.map((p) => p.id));
+    queryClient.setQueryData(jobKeys.detail(id), (prev: any) => {
+      if (!prev) return prev;
+      const without = (prev[photoType] ?? []).filter((p: JobMedia) => !pendingIds.has(p.id));
+      return { ...prev, [photoType]: [...without, ...confirmed] };
+    });
+
+    // 5. Single Firestore write — read the authoritative list from the updated cache.
+    if (confirmed.length > 0) {
+      const latestJob = queryClient.getQueryData<any>(jobKeys.detail(id));
+      const finalPhotos: JobMedia[] = latestJob?.[photoType] ?? [];
+      updateJobMutate({ id, data: { [photoType]: finalPhotos } as Partial<Job> });
+    }
+
+    if (failedCount > 0) {
+      Alert.alert(
+        'Upload Incomplete',
+        `${failedCount} photo${failedCount === 1 ? '' : 's'} failed to upload. Please try again.`,
+      );
+    }
+  };
+
+  // Triggered by the ImageCommentModal "Upload" button (camera flow only).
+  // Clears the staged upload state, then delegates to the shared engine.
+  const handleCommitUpload = (comment: string) => {
+    if (!pendingUpload) return;
+    const { uris, photoType } = pendingUpload;
+    setPendingUpload(null);
+    executeUpload(uris, photoType, comment);
   };
 
   const handleDeletePhoto = (media: JobMedia) => {
@@ -1118,24 +1150,12 @@ export default function JobDetailScreen() {
         {/* ── Media Tab ── */}
         {activeJobTab === 'media' && (
           <>
-            {/* Vault sync banner — shown when photos were saved offline */}
-            {pendingCount > 0 && (
-              <Pressable
-                style={[styles.syncBanner, isSyncing && { opacity: 0.7 }]}
-                onPress={() => triggerSync(id, refreshMedia)}
-                disabled={isSyncing}
-              >
-                <Ionicons name="cloud-upload-outline" size={18} color={COLORS.white} />
-                <Typography style={styles.syncBannerText}>
-                  {isSyncing
-                    ? 'Syncing…'
-                    : `Sync ${pendingCount} Offline Item${pendingCount === 1 ? '' : 's'} to Cloud`}
-                </Typography>
-                {!isSyncing && (
-                  <Ionicons name="chevron-forward" size={16} color={COLORS.white} />
-                )}
-              </Pressable>
-            )}
+            <Button
+              variant="primary"
+              label="📄  Generate PDF Report"
+              onPress={() => setIsReportModalVisible(true)}
+              style={styles.generateReportBtn}
+            />
             {FILE_SECTIONS.map(({ type: sectionType, label }) => {
               const isDoc = sectionType === 'document';
               const photoField =
@@ -1151,19 +1171,7 @@ export default function JobDetailScreen() {
                     (f: any) => f.type === 'document',
                   ) as JobFile[])
                 : [];
-              const photoQueue = isDoc
-                ? null
-                : sectionType === 'inspection'
-                  ? inspectionQueue
-                  : installQueue;
-              const queueItems = photoQueue?.items ?? [];
-              const pendingVaultPhotos = isDoc
-                ? []
-                : sectionType === 'inspection'
-                  ? pendingInspectionPhotos
-                  : pendingInstallPhotos;
-              const hasPhotoContent =
-                photos.length > 0 || queueItems.length > 0 || pendingVaultPhotos.length > 0;
+              const hasPhotoContent = photos.length > 0;
 
               return (
                 <View
@@ -1209,24 +1217,6 @@ export default function JobDetailScreen() {
                         onPress={handleAddDocument}
                         isLoading={isUploading}
                       />
-                      {/* Vault documents — saved offline, pending upload */}
-                      {pendingDocuments.length > 0 && (
-                        <View style={styles.photoGrid}>
-                          {pendingDocuments.map((vf) => (
-                            <View key={vf.uri} style={styles.photoThumbWrapper}>
-                              <View style={[styles.docCard, { opacity: 0.6 }]}>
-                                <Typography style={styles.docCardIcon}>📄</Typography>
-                                <Typography style={styles.docCardName} numberOfLines={3}>
-                                  {vf.name}
-                                </Typography>
-                                <View style={styles.docSharedBadge}>
-                                  <Typography style={styles.sharedBadgeText}>Offline</Typography>
-                                </View>
-                              </View>
-                            </View>
-                          ))}
-                        </View>
-                      )}
                       {docFiles.length > 0 ? (
                         <View style={styles.photoGrid}>
                           {docFiles.map((f) => (
@@ -1303,78 +1293,48 @@ export default function JobDetailScreen() {
                               marginTop: SPACING.sm,
                             }}
                           >
-                            {/* ── Local vault photos — always shown first, online or offline ── */}
-                            {pendingVaultPhotos.map((uri: string) => (
-                              <View key={uri} style={styles.queueThumbWrapper}>
-                                <Image
-                                  source={{ uri }}
-                                  style={styles.photoHThumb}
-                                  contentFit="cover"
-                                />
-                                <View style={styles.offlinePendingStrip}>
-                                  <Typography style={styles.offlinePendingLabel}>
-                                    OFFLINE
-                                  </Typography>
-                                </View>
-                              </View>
-                            ))}
-                            {/* ── Confirmed photos from Firestore ── */}
-                            {photos.map((photo, i) => (
-                              <Pressable
-                                key={photo.id}
-                                onPress={() => {
-                                  setViewingMediaList(photos);
-                                  setViewingMediaIdx(i);
-                                }}
-                                onLongPress={() => handleDeletePhoto(photo)}
-                              >
-                                <View>
-                                  <Image
-                                    source={{ uri: photo.url }}
-                                    style={styles.photoHThumb}
-                                    contentFit="cover"
-                                    cachePolicy="disk"
-                                  />
-                                  {photo.shared && (
-                                    <View style={styles.sharedBadge}>
-                                      <Typography style={styles.sharedBadgeText}>Shared</Typography>
-                                    </View>
-                                  )}
-                                </View>
-                              </Pressable>
-                            ))}
-                            {/* In-flight queue items — show local preview with overlay */}
-                            {queueItems.map((item) => (
-                              <View key={item.id} style={styles.queueThumbWrapper}>
-                                <Image
-                                  source={{ uri: item.cachedUri }}
-                                  style={[
-                                    styles.photoHThumb,
-                                    { opacity: item.status === 'failed' ? 0.35 : 0.65 },
-                                  ]}
-                                  contentFit="cover"
-                                />
-                                {(item.status === 'pending' || item.status === 'uploading') && (
-                                  <View style={styles.uploadOverlay}>
-                                    {item.status === 'uploading' ? (
-                                      <Typography style={styles.uploadProgress}>
-                                        {Math.round(item.progress * 100)}%
+                            {photos.map((photo) => {
+                              // Items injected by handleCommitUpload use a
+                              // 'pending_' prefix — they have local picker URIs
+                              // and show an "Uploading…" badge until confirmed.
+                              const isPending = photo.id.startsWith('pending_');
+                              const confirmed = photos.filter((p) => !p.id.startsWith('pending_'));
+                              return (
+                                <Pressable
+                                  key={photo.id}
+                                  onPress={() => {
+                                    if (isPending) return;
+                                    setViewingMediaList(confirmed);
+                                    setViewingMediaIdx(confirmed.findIndex((p) => p.id === photo.id));
+                                  }}
+                                  onLongPress={() => !isPending && handleDeletePhoto(photo)}
+                                >
+                                  <View style={styles.photoThumbWrapper}>
+                                    <Image
+                                      source={{ uri: photo.url }}
+                                      style={[styles.photoHThumb, isPending && styles.photoThumbPending]}
+                                      contentFit="cover"
+                                      cachePolicy={isPending ? 'memory' : 'disk'}
+                                    />
+                                    {isPending && (
+                                      <View style={styles.syncingBadge}>
+                                        <Typography style={styles.syncingBadgeText}>Uploading…</Typography>
+                                      </View>
+                                    )}
+                                    {!isPending && photo.shared && (
+                                      <View style={styles.sharedBadge}>
+                                        <Typography style={styles.sharedBadgeText}>Shared</Typography>
+                                      </View>
+                                    )}
+                                    {!!photo.comment && (
+                                      <Typography style={styles.photoComment} numberOfLines={2}>
+                                        {photo.comment}
                                       </Typography>
-                                    ) : (
-                                      <ActivityIndicator size="small" color={COLORS.white} />
                                     )}
                                   </View>
-                                )}
-                                {item.status === 'failed' && (
-                                  <Pressable
-                                    style={styles.retryOverlay}
-                                    onPress={() => photoQueue!.retryUpload(item.id)}
-                                  >
-                                    <Typography style={styles.retryLabel}>↺ Retry</Typography>
-                                  </Pressable>
-                                )}
-                              </View>
-                            ))}
+                                </Pressable>
+                              );
+                            })}
                           </ScrollView>
                           <Typography variant="caption" style={styles.photoHint}>
                             Tap to view  ·  Long press to delete
@@ -1513,6 +1473,25 @@ export default function JobDetailScreen() {
               />
             </View>
 
+            <View style={styles.commentInputWrapper}>
+              <TextInput
+                style={styles.commentInput}
+                placeholder="Add a note about this photo..."
+                placeholderTextColor={COLORS.textDisabled}
+                value={editingMediaComment}
+                onChangeText={(t) => setEditingMediaComment(t.slice(0, 115))}
+                maxLength={115}
+                multiline
+                textAlignVertical="top"
+              />
+              <Typography style={[
+                styles.commentCounter,
+                editingMediaComment.length >= 115 && { color: COLORS.danger },
+              ]}>
+                {editingMediaComment.length}/115
+              </Typography>
+            </View>
+
             <View style={styles.fileModalActions}>
               <Button
                 variant="outline"
@@ -1612,6 +1591,27 @@ export default function JobDetailScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* ── Report Generator Modal ── */}
+      {job && customer && (
+        <ReportGeneratorModal
+          visible={isReportModalVisible}
+          onClose={() => setIsReportModalVisible(false)}
+          job={job}
+          customer={customer}
+        />
+      )}
+
+      {/* ── Upload Comment Modal ── */}
+      {pendingUpload && (
+        <ImageCommentModal
+          mode="upload"
+          visible={!!pendingUpload}
+          uri={pendingUpload.uris[0]}
+          onUpload={handleCommitUpload}
+          onCancel={() => setPendingUpload(null)}
+        />
+      )}
 
       {/* ── Edit Details Modal ── */}
       <Modal
@@ -3460,5 +3460,60 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHT.heavy,
     color: COLORS.white,
     letterSpacing: 0.8,
+  },
+
+  commentInputWrapper: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.background,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.sm,
+    paddingBottom: SPACING.xs,
+    marginTop: SPACING.sm,
+    minHeight: 80,
+  },
+  commentInput: {
+    fontSize: FONT_SIZE.base,
+    color: COLORS.textPrimary,
+    lineHeight: 20,
+    minHeight: 52,
+  },
+  commentCounter: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    textAlign: 'right',
+    marginTop: SPACING.xs,
+  },
+
+  photoComment: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    marginTop: 4,
+    maxWidth: 80,
+  },
+
+  photoThumbPending: {
+    opacity: 0.55,
+  },
+  syncingBadge: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    paddingVertical: 3,
+    alignItems: 'center',
+  },
+  syncingBadgeText: {
+    fontSize: 9,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.white,
+    letterSpacing: 0.5,
+  },
+  generateReportBtn: {
+    marginHorizontal: SPACING.base,
+    marginTop: SPACING.base,
+    marginBottom: SPACING.sm,
   },
 });

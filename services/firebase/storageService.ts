@@ -2,7 +2,60 @@ import { deleteObject, getDownloadURL, ref, uploadBytesResumable } from 'firebas
 import { storage } from '../../config/firebaseConfig';
 import type { JobMedia } from '../../types/job';
 
-// ─── Photo Upload ──────────────────────────────────────────────────────────────
+// ─── Direct Photo Upload (Online-Only) ────────────────────────────────────────
+
+/**
+ * Uploads a single job photo directly to Firebase Storage and returns a
+ * fully-populated JobMedia object.
+ *
+ * Uses the XHR blob method to bypass React Native's fetch() limitations with
+ * local picker file:// URIs on Hermes. The blob is uploaded with an explicit
+ * `contentType: 'image/jpeg'` metadata hint so Firebase Storage sets the
+ * correct MIME type for the object.
+ *
+ * Stored at: jobs/{jobId}/{photoType}/{mediaId}.jpg
+ *
+ * @param jobId     - The Firestore job document ID.
+ * @param photoType - 'inspectionPhotos' or 'installPhotos'.
+ * @param uri       - The local file URI returned by the image picker / camera.
+ * @param comment   - Optional 115-char annotation attached to the photo.
+ */
+export async function uploadJobPhotoDirect(
+  jobId: string,
+  photoType: 'inspectionPhotos' | 'installPhotos',
+  uri: string,
+  comment = '',
+): Promise<JobMedia> {
+  // XHR blob — bulletproof with file:// URIs on Hermes / React Native.
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.onload = () => resolve(xhr.response);
+    xhr.onerror = () => reject(new TypeError('Network request failed'));
+    xhr.responseType = 'blob';
+    xhr.open('GET', uri, true);
+    xhr.send(null);
+  });
+
+  const mediaId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const imageRef = ref(storage, `jobs/${jobId}/${photoType}/${mediaId}.jpg`);
+
+  await new Promise<void>((resolve, reject) => {
+    const task = uploadBytesResumable(imageRef, blob, { contentType: 'image/jpeg' });
+    task.on('state_changed', undefined, reject, resolve);
+  });
+
+  const url = await getDownloadURL(imageRef);
+  return {
+    id: mediaId,
+    url,
+    category: photoType === 'inspectionPhotos' ? 'inspection' : 'install',
+    shared: false,
+    uploadedAt: new Date().toISOString(),
+    comment,
+  };
+}
+
+// ─── Photo Upload (legacy — kept for SyncContext vault uploads) ───────────────
 
 /**
  * Uploads a single job photo to Firebase Storage and returns a typed JobMedia object.
@@ -22,20 +75,27 @@ export async function uploadJobPhoto(
   uri: string,
   uniqueSuffix?: string,
   onProgress?: (progress: number) => void,
+  comment = '',
 ): Promise<JobMedia> {
   try {
-    const response = await fetch(uri);
-    const blob = await response.blob();
+    // Bulletproof blob — XHR avoids fetch limitations with file:// URIs on RN.
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.onload = () => resolve(xhr.response);
+      xhr.onerror = () => reject(new TypeError('Network request failed'));
+      xhr.responseType = 'blob';
+      xhr.open('GET', uri, true);
+      xhr.send(null);
+    });
+
     const mediaId = uniqueSuffix ? `${Date.now()}_${uniqueSuffix}` : Date.now().toString();
-    const imageRef = ref(storage, `jobs/${jobId}/${photoType}/${mediaId}`);
+    const imageRef = ref(storage, `jobs/${jobId}/${photoType}/${mediaId}.jpg`);
 
     await new Promise<void>((resolve, reject) => {
       const task = uploadBytesResumable(imageRef, blob);
       task.on(
         'state_changed',
-        (snapshot) => {
-          onProgress?.(snapshot.bytesTransferred / snapshot.totalBytes);
-        },
+        (snapshot) => { onProgress?.(snapshot.bytesTransferred / snapshot.totalBytes); },
         reject,
         resolve,
       );
@@ -48,13 +108,13 @@ export async function uploadJobPhoto(
       category: photoType === 'inspectionPhotos' ? 'inspection' : 'install',
       shared: false,
       uploadedAt: new Date().toISOString(),
+      comment,
     };
   } catch (error) {
     console.error('[storageService] uploadJobPhoto failed:', error);
     throw new Error('Failed to upload photo. Please try again.');
   }
 }
-
 // ─── Document Upload ───────────────────────────────────────────────────────────
 
 /**

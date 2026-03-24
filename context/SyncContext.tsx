@@ -42,6 +42,7 @@ import {
   uploadJobDocument,
   appendJobFile,
 } from '../services';
+import { processMediaQueue } from '../services/mediaQueueService';
 import { jobKeys } from '../hooks/useJobs';
 import type { JobFile } from '../types';
 
@@ -341,6 +342,14 @@ export function SyncProvider({ children }: { children: ReactNode }) {
           queryClient.invalidateQueries({ queryKey: jobKeys.detail(jobId) });
           queryClient.invalidateQueries({ queryKey: jobKeys.all });
         }
+
+        // Drain the async media queue (comment-annotated photos staged via
+        // addToMediaQueue). Runs globally — clears all pending items, not just
+        // the current jobId, so one sync pass handles everything.
+        await processMediaQueue((updatedJobId) => {
+          queryClient.invalidateQueries({ queryKey: jobKeys.detail(updatedJobId) });
+          queryClient.invalidateQueries({ queryKey: jobKeys.all });
+        });
 
         onComplete?.();
       } finally {

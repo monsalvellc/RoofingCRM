@@ -174,9 +174,17 @@ export async function createJob(
   };
 
   // 2. True fire-and-forget — no await.
-  setDoc(doc(db, COLLECTIONS.jobs, newId), payload).catch((e) =>
-    console.warn('[jobsService] createJob pending sync:', e),
-  );
+// New Error Trap
+console.log("ATTEMPTING TO CREATE JOB IN FIREBASE WITH PAYLOAD:", payload);
+
+setDoc(doc(db, COLLECTIONS.jobs, newId), payload)
+  .then(() => {
+    console.log("JOB SUCCESSFULLY SAVED TO FIREBASE!");
+  })
+  .catch((error) => {
+    console.error("FIREBASE REJECTED THE JOB. Reason:", error.code, error.message);
+  });
+  
   updateDoc(doc(db, COLLECTIONS.customers, data.customerId), {
     jobIds: arrayUnion(newId),
   }).catch((e) => console.warn('[jobsService] jobIds pending sync:', e));
@@ -348,6 +356,26 @@ export async function replaceJobMedia(
 ): Promise<void> {
   updateDoc(doc(db, COLLECTIONS.jobs, jobId), { [photoType]: media }).catch((e) =>
     console.warn('[jobsService] replaceJobMedia pending sync:', e),
+  );
+}
+
+/**
+ * Updates the comment on a single JobMedia item within a photo array.
+ * Reads the current array, patches the matching item, and writes the whole
+ * array back — consistent with the pattern used everywhere else in this service.
+ */
+export async function updateJobMediaComment(
+  jobId: string,
+  photoType: 'inspectionPhotos' | 'installPhotos',
+  mediaId: string,
+  comment: string,
+  currentPhotos: JobMedia[],
+): Promise<void> {
+  const updated = currentPhotos.map((p) =>
+    p.id === mediaId ? { ...p, comment } : p,
+  );
+  updateDoc(doc(db, COLLECTIONS.jobs, jobId), { [photoType]: updated }).catch((e) =>
+    console.warn('[jobsService] updateJobMediaComment pending sync:', e),
   );
 }
 

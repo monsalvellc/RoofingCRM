@@ -40,6 +40,7 @@ export interface JobMedia {
   category: 'inspection' | 'install';
   shared: boolean;
   uploadedAt: string;
+  comment?: string;
 }
 
 export interface Job {
